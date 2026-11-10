@@ -1,0 +1,1572 @@
+{
+  "schema_version": 2,
+  "coverage": "Candidate names checked against sampled PowerFactory 2024 objects, not exhaustive API enumeration. Parameters and calculation results are separate. Native calculation validity and per-object attribute availability must be checked at read time. RMS time-series channels require ElmRes; no verified RMS defaults are included.",
+  "calculations": {
+    "power_flow": {
+      "command_class": "ComLdf",
+      "validity_method": "IsLdfValid",
+      "result_source": "element_attributes"
+    },
+    "short_circuit": {
+      "command_class": "ComShc",
+      "validity_method": "IsShcValid",
+      "result_source": "element_attributes"
+    },
+    "rms": {
+      "command_class": "ComSim",
+      "validity_method": "IsRmsValid",
+      "result_source": "ElmRes"
+    }
+  },
+  "elements": {
+    "ElmTerm": {
+      "label": "Terminals/buses",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "uknom",
+          "outserv"
+        ],
+        "extended": [
+          "loc_name",
+          "uknom",
+          "outserv",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "iUsage",
+          "systype",
+          "phtech",
+          "iEarth",
+          "cpArea",
+          "cpZone",
+          "cpOwner",
+          "GPSlat",
+          "GPSlon",
+          "nphase"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "m:u",
+            "m:U",
+            "m:phiu",
+            "m:U1",
+            "m:U2",
+            "m:U0",
+            "m:u1",
+            "m:u2",
+            "m:u0",
+            "m:u:A",
+            "m:u:B",
+            "m:u:C",
+            "m:phiu1"
+          ],
+          "defaults": [
+            "m:u1",
+            "m:u",
+            "m:U",
+            "m:phiu",
+            "m:u:A",
+            "m:u:B",
+            "m:u:C"
+          ]
+        },
+        "short_circuit": {
+          "attributes": [
+            "m:Ikss",
+            "m:Skss",
+            "m:ip",
+            "m:Ith"
+          ],
+          "defaults": [
+            "m:Ikss",
+            "m:Skss",
+            "m:ip",
+            "m:Ith"
+          ]
+        }
+      }
+    },
+    "ElmLne": {
+      "label": "Lines/cables",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "dline",
+          "outserv",
+          "typ_id"
+        ],
+        "extended": [
+          "loc_name",
+          "dline",
+          "outserv",
+          "typ_id",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "bus1",
+          "bus2",
+          "nlnum",
+          "fline",
+          "inAir",
+          "R0",
+          "X0",
+          "B0",
+          "R1",
+          "X1",
+          "B1"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "c:loading",
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1",
+            "m:P:bus2",
+            "m:Q:bus2",
+            "m:I:bus2",
+            "c:Ploss",
+            "c:Qloss"
+          ],
+          "defaults": [
+            "c:loading",
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1",
+            "m:P:bus2",
+            "m:Q:bus2",
+            "m:I:bus2",
+            "c:Ploss",
+            "c:Qloss"
+          ]
+        }
+      }
+    },
+    "ElmTr2": {
+      "label": "Two-winding transformers",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "ntnum",
+          "nntap",
+          "ntrcn",
+          "ratfac",
+          "bushv",
+          "buslv"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "ntnum",
+          "nntap",
+          "ntrcn",
+          "ratfac",
+          "bushv",
+          "buslv",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "i_auto",
+          "cgnd_h",
+          "cgnd_l",
+          "re0tr_h",
+          "xe0tr_h",
+          "re0tr_l",
+          "xe0tr_l",
+          "iMeasLoc",
+          "nntap2",
+          "usetp",
+          "usp_low",
+          "usp_up",
+          "usetp2",
+          "usp_low2",
+          "usp_up2",
+          "i_cont",
+          "ntrcn2",
+          "imldc",
+          "t2ldc",
+          "t2ldc2",
+          "i_rem",
+          "p_rem",
+          "p_cub",
+          "uset_mode",
+          "c_ptapc",
+          "c_pstac"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "c:loading",
+            "m:P:bushv",
+            "m:Q:bushv",
+            "m:P:buslv",
+            "m:Q:buslv",
+            "c:Ploss",
+            "c:Qloss"
+          ],
+          "defaults": [
+            "c:loading",
+            "m:P:bushv",
+            "m:Q:bushv",
+            "m:P:buslv",
+            "m:Q:buslv",
+            "c:Ploss",
+            "c:Qloss"
+          ]
+        }
+      }
+    },
+    "ElmTr3": {
+      "label": "Three-winding transformers",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "nt3nm",
+          "n3tap_h",
+          "n3tap_m",
+          "n3tap_l",
+          "ntrcn",
+          "bushv",
+          "busmv",
+          "buslv"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "nt3nm",
+          "n3tap_h",
+          "n3tap_m",
+          "n3tap_l",
+          "ntrcn",
+          "bushv",
+          "busmv",
+          "buslv",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "cgnd_h",
+          "cgnd_m",
+          "cgnd_l",
+          "iMeasLoc",
+          "usetp",
+          "usp_low",
+          "usp_up",
+          "i_cont",
+          "imldc",
+          "i_rem",
+          "p_rem",
+          "p_cub",
+          "uset_mode",
+          "c_ptapc",
+          "c_pstac"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "c:loading",
+            "m:P:bushv",
+            "m:Q:bushv",
+            "m:P:busmv",
+            "m:Q:busmv",
+            "m:P:buslv",
+            "m:Q:buslv",
+            "c:Ploss",
+            "c:Qloss"
+          ],
+          "defaults": [
+            "c:loading",
+            "m:P:bushv",
+            "m:Q:bushv",
+            "m:P:busmv",
+            "m:Q:busmv",
+            "m:P:buslv",
+            "m:Q:buslv",
+            "c:Ploss",
+            "c:Qloss"
+          ]
+        }
+      }
+    },
+    "ElmSym": {
+      "label": "Synchronous machines",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "bus1",
+          "ngnum",
+          "pgini",
+          "qgini",
+          "bustp",
+          "usetp"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "bus1",
+          "ngnum",
+          "pgini",
+          "qgini",
+          "av_mode",
+          "usetp",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "cosgini",
+          "ip_ctrl",
+          "Pmax_uc",
+          "Pmin_uc",
+          "pf_recap",
+          "i_mot",
+          "c_pmod",
+          "iintgnd",
+          "cgnd",
+          "sgini",
+          "ictpg",
+          "ictqg",
+          "costp",
+          "iestp",
+          "iestq",
+          "bustp",
+          "xesy",
+          "resy",
+          "iv_mode",
+          "i_spin",
+          "phiini",
+          "pStoch",
+          "Pctrl",
+          "i_prty",
+          "iOPFCPmin",
+          "iOPFCPmax",
+          "cost_up",
+          "dsecres",
+          "iqtype",
+          "q_min",
+          "q_max",
+          "i_cap",
+          "cap_P",
+          "cap_Qmn",
+          "cap_Qmx",
+          "ignd",
+          "mode_inp",
+          "c_pstac",
+          "P_max"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1",
+            "c:loading"
+          ],
+          "defaults": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1",
+            "c:loading"
+          ]
+        }
+      }
+    },
+    "ElmGenstat": {
+      "label": "Static generators",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "pgini",
+          "qgini",
+          "sgn",
+          "cosn"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "pgini",
+          "qgini",
+          "sgn",
+          "cosn",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "ngnum",
+          "cosgini",
+          "av_mode",
+          "usetp",
+          "ip_ctrl",
+          "Pmax_uc",
+          "Pmin_uc",
+          "scale0",
+          "pf_recap",
+          "iSimModel",
+          "c_pmod",
+          "r0",
+          "x0",
+          "r2",
+          "x2",
+          "bustp",
+          "c_pstac",
+          "P_max",
+          "q_min",
+          "q_max",
+          "nphase",
+          "mode_inp"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1",
+            "c:loading"
+          ],
+          "defaults": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1",
+            "c:loading"
+          ]
+        }
+      }
+    },
+    "ElmXnet": {
+      "label": "External grids",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "bustp",
+          "usetp"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "bustp",
+          "usetp",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "manuf",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "phiini",
+          "pgini",
+          "qgini",
+          "snss",
+          "rntxn",
+          "rntxnmin",
+          "x0tx1",
+          "r0tx0",
+          "iintgnd",
+          "ikss",
+          "ikssmin",
+          "snssmin"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1"
+          ],
+          "defaults": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1"
+          ]
+        }
+      }
+    },
+    "ElmLod": {
+      "label": "General loads",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "bus1",
+          "plini",
+          "qlini"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "bus1",
+          "plini",
+          "qlini",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "phtech",
+          "pf_recap",
+          "slini",
+          "coslini",
+          "scale0",
+          "u0",
+          "i_sym",
+          "plinir",
+          "plinis",
+          "plinit",
+          "qlinir",
+          "qlinis",
+          "qlinit",
+          "slinir",
+          "slinis",
+          "slinit",
+          "coslinir",
+          "coslinis",
+          "coslinit",
+          "mode_inp",
+          "i_scale"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1"
+          ],
+          "defaults": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1"
+          ]
+        }
+      }
+    },
+    "ElmShnt": {
+      "label": "Shunt/filter elements",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "ushnm",
+          "shtype",
+          "qtotn",
+          "ncapa",
+          "ncapx"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "ushnm",
+          "shtype",
+          "qtotn",
+          "ncapa",
+          "ncapx",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "manuf",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "ctech",
+          "nshph",
+          "iintgnd",
+          "ignd",
+          "imldc",
+          "ilcph",
+          "iQorient",
+          "capsa",
+          "qcapn",
+          "cucap",
+          "rrea",
+          "greaf0",
+          "fres",
+          "iswitch",
+          "qrean",
+          "gparac",
+          "bcap",
+          "tandc"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1"
+          ],
+          "defaults": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1"
+          ]
+        }
+      }
+    },
+    "ElmNet": {
+      "label": "Grids/network containers",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "frnom"
+        ],
+        "extended": [
+          "loc_name",
+          "frnom",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "fold_id"
+        ]
+      },
+      "results": {}
+    },
+    "ElmTow": {
+      "label": "Line couplings",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "plines"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "fold_id",
+          "plines",
+          "dpolar",
+          "i_dist",
+          "c_dist",
+          "c_lumped",
+          "ftau"
+        ]
+      },
+      "results": {}
+    },
+    "ElmCabsys": {
+      "label": "Cable-system couplings",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "plines"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "fold_id",
+          "plines",
+          "dpolar",
+          "i_dist",
+          "c_dist",
+          "c_lumped",
+          "ftau"
+        ]
+      },
+      "results": {}
+    },
+    "ElmMut": {
+      "label": "Mutual data",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "manuf",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "bus1",
+          "bus2"
+        ]
+      },
+      "results": {}
+    },
+    "ElmAsm": {
+      "label": "Asynchronous machines",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "bus1"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "bus1",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "ngnum",
+          "pgini",
+          "qgini",
+          "cosgini",
+          "av_mode",
+          "usetp",
+          "Pmax_uc",
+          "Pmin_uc",
+          "pf_recap",
+          "i_mot",
+          "c_pmod",
+          "monof",
+          "mdmex",
+          "mdmlp",
+          "tstart",
+          "iconfed",
+          "i_rem",
+          "p_cub",
+          "i_pset",
+          "iAstabint",
+          "ignd",
+          "iintgnd",
+          "Xe",
+          "Re",
+          "iUseStart",
+          "iStartMethod",
+          "Tyd",
+          "idfig",
+          "c_pstac",
+          "P_max",
+          "q_min",
+          "q_max",
+          "mode_inp"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1",
+            "c:loading"
+          ],
+          "defaults": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1",
+            "c:loading"
+          ]
+        }
+      }
+    },
+    "ElmSvs": {
+      "label": "Static var systems",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "bus1"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "manuf",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "qmin",
+          "qmax",
+          "usetp",
+          "qsetp",
+          "c_pstac",
+          "i_ctrl"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1"
+          ],
+          "defaults": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1"
+          ]
+        }
+      }
+    },
+    "ElmCoup": {
+      "label": "Breakers/switches",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "bus2",
+          "on_off",
+          "aUsage"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "bus2",
+          "on_off",
+          "aUsage",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "typ_id",
+          "nphase",
+          "nneutral",
+          "Inom"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1"
+          ],
+          "defaults": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:I:bus1"
+          ]
+        }
+      }
+    },
+    "ElmLnesec": {
+      "label": "Line subsections",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "typ_id",
+          "dline"
+        ],
+        "extended": [
+          "loc_name",
+          "typ_id",
+          "dline",
+          "outserv",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "fline"
+        ]
+      },
+      "results": {}
+    },
+    "ElmNec": {
+      "label": "Neutral earthing elements",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "bus1"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "manuf",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "R0",
+          "X0"
+        ]
+      },
+      "results": {}
+    },
+    "ElmVoltreg": {
+      "label": "Step-voltage regulators",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "typ_id",
+          "ntrcn",
+          "ratfac",
+          "usetp",
+          "dutap",
+          "nntap1",
+          "nntap2",
+          "nntap3",
+          "usp_low",
+          "usp_up",
+          "i_cont"
+        ]
+      },
+      "results": {}
+    },
+    "ElmVac": {
+      "label": "AC voltage sources",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "bus1"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "manuf",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "Unom",
+          "usetp",
+          "R1",
+          "X1",
+          "R0",
+          "X0",
+          "nphase"
+        ]
+      },
+      "results": {}
+    },
+    "ElmZpu": {
+      "label": "Common impedances",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "bus2"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "bus1",
+          "bus2",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "manuf",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "Sn",
+          "nphases",
+          "iequalz",
+          "iz2eqz1",
+          "r_pu",
+          "x_pu",
+          "r_pu_ji",
+          "x_pu_ji",
+          "r0_pu",
+          "x0_pu",
+          "r0_pu_ji",
+          "x0_pu_ji",
+          "r2_pu",
+          "x2_pu",
+          "r2_pu_ji",
+          "x2_pu_ji",
+          "iZshc",
+          "rs_pu",
+          "xs_pu",
+          "rs_pu_ji",
+          "xs_pu_ji",
+          "r0s_pu",
+          "x0s_pu",
+          "r0s_pu_ji",
+          "x0s_pu_ji",
+          "r2s_pu",
+          "x2s_pu",
+          "r2s_pu_ji",
+          "x2s_pu_ji"
+        ]
+      },
+      "results": {
+        "power_flow": {
+          "attributes": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:P:bus2",
+            "m:Q:bus2"
+          ],
+          "defaults": [
+            "m:P:bus1",
+            "m:Q:bus1",
+            "m:P:bus2",
+            "m:Q:bus2"
+          ]
+        }
+      }
+    }
+  },
+  "types": {
+    "TypLne": {
+      "label": "Line/cable types",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "uline",
+          "sline",
+          "rline",
+          "xline",
+          "cline",
+          "rline0",
+          "xline0",
+          "cline0",
+          "nlnph",
+          "nneutral"
+        ],
+        "extended": [
+          "loc_name",
+          "uline",
+          "sline",
+          "rline",
+          "xline",
+          "cline",
+          "rline0",
+          "xline0",
+          "cline0",
+          "nlnph",
+          "nneutral",
+          "desc",
+          "chr_name",
+          "for_name",
+          "manuf",
+          "doc_id",
+          "fold_id",
+          "frnom",
+          "systp",
+          "rtemp",
+          "alpha",
+          "gline",
+          "gline0",
+          "bline",
+          "bline0"
+        ]
+      },
+      "results": {}
+    },
+    "TypTr2": {
+      "label": "Two-winding transformer types",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "strn",
+          "utrn_h",
+          "utrn_l",
+          "frnom",
+          "uktr",
+          "pcutr",
+          "pfe",
+          "curmg",
+          "tr2cn_h",
+          "tr2cn_l",
+          "nt2ag",
+          "tap_side",
+          "dutap",
+          "nntap0",
+          "ntpmn",
+          "ntpmx",
+          "uk0tr",
+          "ur0tr"
+        ],
+        "extended": [
+          "loc_name",
+          "strn",
+          "utrn_h",
+          "utrn_l",
+          "frnom",
+          "uktr",
+          "pcutr",
+          "pfe",
+          "curmg",
+          "tr2cn_h",
+          "tr2cn_l",
+          "nt2ag",
+          "tap_side",
+          "dutap",
+          "nntap0",
+          "ntpmn",
+          "ntpmx",
+          "uk0tr",
+          "ur0tr",
+          "desc",
+          "chr_name",
+          "for_name",
+          "manuf",
+          "doc_id",
+          "fold_id",
+          "phitr",
+          "strnfc",
+          "oltc",
+          "itapzdep",
+          "uktmn",
+          "pcutmn",
+          "uktmx",
+          "pcutmx",
+          "uk0tmn",
+          "uk0rtmn",
+          "uk0tmx",
+          "uk0rtmx",
+          "zx0hl_h",
+          "zx0hl_n",
+          "iLimb",
+          "iInterPol",
+          "smoothfac",
+          "xmlin",
+          "xmair",
+          "ksat",
+          "cknee",
+          "psi0",
+          "itrdl",
+          "itrdr",
+          "itrmt",
+          "it0mt",
+          "ansiclass",
+          "pict2",
+          "pitt2",
+          "twct2",
+          "twtt2"
+        ]
+      },
+      "results": {}
+    },
+    "TypTr3": {
+      "label": "Three-winding transformer types",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "strn3_h",
+          "strn3_m",
+          "strn3_l",
+          "utrn3_h",
+          "utrn3_m",
+          "utrn3_l",
+          "uktr3_h",
+          "uktr3_m",
+          "uktr3_l",
+          "pcut3_h",
+          "pcut3_m",
+          "pcut3_l",
+          "pfe",
+          "tr3cn_h",
+          "tr3cn_m",
+          "tr3cn_l",
+          "nt3ag_h",
+          "nt3ag_m",
+          "nt3ag_l"
+        ],
+        "extended": [
+          "loc_name",
+          "strn3_h",
+          "strn3_m",
+          "strn3_l",
+          "utrn3_h",
+          "utrn3_m",
+          "utrn3_l",
+          "uktr3_h",
+          "uktr3_m",
+          "uktr3_l",
+          "pcut3_h",
+          "pcut3_m",
+          "pcut3_l",
+          "pfe",
+          "tr3cn_h",
+          "tr3cn_m",
+          "tr3cn_l",
+          "nt3ag_h",
+          "nt3ag_m",
+          "nt3ag_l",
+          "desc",
+          "chr_name",
+          "for_name",
+          "manuf",
+          "doc_id",
+          "fold_id",
+          "curm3",
+          "n3tp0_h",
+          "n3tp0_m",
+          "n3tp0_l",
+          "n3tmn_h",
+          "n3tmn_m",
+          "n3tmn_l",
+          "n3tmx_h",
+          "n3tmx_m",
+          "n3tmx_l",
+          "du3tp_h",
+          "du3tp_m",
+          "du3tp_l",
+          "ph3tr_h",
+          "ph3tr_m",
+          "ph3tr_l",
+          "iLimb",
+          "uk0hm",
+          "uk0ml",
+          "uk0hl",
+          "ur0hm",
+          "ur0ml",
+          "ur0hl"
+        ]
+      },
+      "results": {}
+    },
+    "TypSym": {
+      "label": "Synchronous-machine types",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "sgn",
+          "ugn",
+          "cosn"
+        ],
+        "extended": [
+          "loc_name",
+          "sgn",
+          "ugn",
+          "cosn",
+          "desc",
+          "chr_name",
+          "for_name",
+          "manuf",
+          "doc_id",
+          "fold_id",
+          "nphase",
+          "tag",
+          "h",
+          "xds",
+          "xqs",
+          "tds0",
+          "tqs0",
+          "tdss0",
+          "tqss0",
+          "tdss",
+          "tqss",
+          "rstr",
+          "xl",
+          "tds",
+          "tqs",
+          "xdss",
+          "xqss",
+          "xdsat",
+          "xdsss",
+          "sg10",
+          "sg12",
+          "x2sy",
+          "r2sy",
+          "x0sy",
+          "r0sy",
+          "iamort",
+          "iusesat",
+          "satur",
+          "q_min",
+          "q_max",
+          "Q_min",
+          "Q_max",
+          "iturbo",
+          "isat",
+          "iuseXdk",
+          "curk",
+          "curk1p",
+          "curk2p",
+          "nslty",
+          "tags",
+          "lss",
+          "i_trans",
+          "fcharrstr",
+          "fcharlss",
+          "xrl",
+          "dpu",
+          "hpn"
+        ]
+      },
+      "results": {}
+    },
+    "TypAsmo": {
+      "label": "Asynchronous-machine types (alternative)",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "sgn",
+          "ugn",
+          "cosn"
+        ],
+        "extended": [
+          "loc_name",
+          "sgn",
+          "ugn",
+          "cosn",
+          "desc",
+          "chr_name",
+          "for_name",
+          "manuf",
+          "doc_id",
+          "fold_id",
+          "pgn",
+          "rs",
+          "rr",
+          "xm",
+          "x0",
+          "r0",
+          "tag",
+          "nppol",
+          "aiazn",
+          "rtox",
+          "rstr",
+          "rrtrA",
+          "rrtrB",
+          "xstr",
+          "xrtrA",
+          "xrtrB",
+          "xmrtr",
+          "frequ",
+          "istt",
+          "nslty",
+          "anend",
+          "aslkp",
+          "asstl",
+          "amazn",
+          "amkzn",
+          "amstl",
+          "coazn",
+          "slp",
+          "mslp",
+          "islp",
+          "i_mode",
+          "effic",
+          "i_trans",
+          "rrsn",
+          "xrsn",
+          "rrs1",
+          "xrs1",
+          "rrtrA0",
+          "xrtrA0",
+          "i_cage",
+          "i_optpn",
+          "rtoxshc",
+          "aiaznshc",
+          "xtorshc",
+          "xdssshc",
+          "J",
+          "rzero",
+          "xzero"
+        ]
+      },
+      "results": {}
+    },
+    "TypLod": {
+      "label": "Load types",
+      "parameters": {
+        "basic": [
+          "loc_name"
+        ],
+        "extended": [
+          "loc_name",
+          "desc",
+          "chr_name",
+          "for_name",
+          "manuf",
+          "doc_id",
+          "fold_id",
+          "aP",
+          "bP",
+          "cP",
+          "aQ",
+          "bQ",
+          "cQ",
+          "kpu0",
+          "kqu0",
+          "kpu1",
+          "kqu1",
+          "tpf",
+          "tqf",
+          "phtech",
+          "loddy"
+        ]
+      },
+      "results": {}
+    },
+    "TypTow": {
+      "label": "Tower types",
+      "parameters": {
+        "basic": [
+          "loc_name"
+        ],
+        "extended": [
+          "loc_name",
+          "desc",
+          "chr_name",
+          "for_name",
+          "manuf",
+          "doc_id",
+          "fold_id",
+          "frnom"
+        ]
+      },
+      "results": {}
+    },
+    "TypCabsys": {
+      "label": "Cable-system types",
+      "parameters": {
+        "basic": [
+          "loc_name"
+        ],
+        "extended": [
+          "loc_name",
+          "desc",
+          "chr_name",
+          "for_name",
+          "manuf",
+          "doc_id",
+          "fold_id",
+          "frnom"
+        ]
+      },
+      "results": {}
+    },
+    "TypVoltreg": {
+      "label": "Step-voltage regulator types",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "frnom",
+          "dutap",
+          "nntap0"
+        ],
+        "extended": [
+          "loc_name",
+          "ansiclass",
+          "chr_name",
+          "dat_src",
+          "desc",
+          "doc_id",
+          "dutap",
+          "fold_id",
+          "for_name",
+          "frnom",
+          "itapzdep",
+          "manuf",
+          "nntap0"
+        ]
+      },
+      "results": {}
+    }
+  }
+}

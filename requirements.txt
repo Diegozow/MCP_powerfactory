@@ -1,0 +1,3 @@
+# Install only in the external Python environment, never PowerFactory's Python.
+# MCP SDK used by the external stdio server.
+mcp==2.3.0
