@@ -29,7 +29,7 @@ from pf_model import (
     browse_powerfactory_tree, activate_study_case,
     list_network_variations, change_network_variation,
     activate_operation_scenario, set_study_time, powerfactory_capabilities, IMPLEMENTATION_VERSION,
-    export_graphic, write_operation_scenario,
+    export_graphic, write_operation_scenario, mark_in_graphics,
 )
 
 
@@ -54,6 +54,8 @@ def execute_tool(server, tool, arguments):
         return write_operation_scenario(server.app, server.instance_id, info, tool, arguments)
     if tool == "export_graphic":
         return export_graphic(server.app, info, arguments)
+    if tool == "mark_in_graphics":
+        return mark_in_graphics(server.app, server.instance_id, info, arguments)
     if tool == "set_study_time":
         return set_study_time(server.app, server.instance_id, info, arguments)
     if tool == "activate_operation_scenario":
@@ -313,7 +315,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 "powerfactory_process_id": os.getpid(), "tool": tool,
                 "data": data,
                 "execution": {
-                    "source": "live_powerfactory_session", "read_only": tool not in CALCULATION_TOOLS and tool not in ("capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic") and (tool not in ("save_operation_scenario", "create_operation_scenario") or arguments["confirmation_digest"] is None),
+                    "source": "live_powerfactory_session", "read_only": tool not in CALCULATION_TOOLS and tool not in ("capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic", "mark_in_graphics") and (tool not in ("save_operation_scenario", "create_operation_scenario") or arguments["confirmation_digest"] is None),
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     "script_thread_id": self.server.owner_thread_id,
                     "api_call_thread_id": api_thread_id,
@@ -376,7 +378,12 @@ def run_agent(app, connection_path, port=PORT, run_seconds=RUN_SECONDS,
 
 def main():
     pf = importlib.import_module("powerfactory")
-    app = pf.GetApplication()
+    # ComPython retains this module between launches; keep one native application owner.
+    app = getattr(pf, "_pf_mcp_application", None)
+    if app is None:
+        app = pf.GetApplication()
+        if app is not None:
+            pf._pf_mcp_application = app
     return run_agent(app, default_connection_path())
 
 

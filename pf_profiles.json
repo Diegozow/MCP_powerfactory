@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "coverage": "Candidate names checked against sampled PowerFactory 2024 objects, not exhaustive API enumeration. Parameters and calculation results are separate. Native calculation validity and per-object attribute availability must be checked at read time. RMS time-series channels require ElmRes; no verified RMS defaults are included.",
+  "coverage": "Candidate names checked against sampled PowerFactory 2024 objects or the installed data schema/report definitions, not exhaustive API enumeration. Parameters and calculation results are separate. Native calculation validity and per-object attribute availability must be checked at read time. RMS time-series channels require ElmRes; no verified RMS defaults are included.",
   "calculations": {
     "power_flow": {
       "command_class": "ComLdf",
@@ -1045,6 +1045,182 @@
       },
       "results": {}
     },
+    "ElmRelay": {
+      "label": "Protection relays",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "actset"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "actset",
+          "desc",
+          "for_name",
+          "chr_name",
+          "dat_src",
+          "sernum",
+          "constr",
+          "doc_id",
+          "fold_id",
+          "dev_no",
+          "application",
+          "ctprim",
+          "ctsec",
+          "vtprim",
+          "vtsec",
+          "pOwner",
+          "pOperator",
+          "pReference",
+          "pelm",
+          "cat_curr",
+          "cat_dist",
+          "cat_diff",
+          "cat_volt",
+          "cat_freq",
+          "cat_dir"
+        ]
+      },
+      "results": {
+        "short_circuit": {
+          "attributes": [
+            "c:yout"
+          ],
+          "defaults": [
+            "c:yout"
+          ]
+        }
+      }
+    },
+    "RelToc": {
+      "label": "Time-overcurrent protection blocks",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "Ipset",
+          "Ipsetr",
+          "Tpset",
+          "idir",
+          "pcharac"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "Ipset",
+          "Ipsetr",
+          "Tpset",
+          "idir",
+          "pcharac",
+          "chr_name",
+          "for_name",
+          "dat_src",
+          "fold_id",
+          "iacceptblock",
+          "calcuse",
+          "ModFrame",
+          "resetdis",
+          "ResetT",
+          "udeftmin",
+          "udeftmax",
+          "Tshift",
+          "Tadder",
+          "minresptime",
+          "Trelblock",
+          "cpIpset"
+        ]
+      },
+      "results": {
+        "short_circuit": {
+          "attributes": [
+            "s:yout",
+            "s:Iabs",
+            "s:Iabs:A",
+            "s:Iabs:B",
+            "s:Iabs:C",
+            "c:Ipabs",
+            "c:Ipabs:A",
+            "c:Ipabs:B",
+            "c:Ipabs:C"
+          ],
+          "defaults": [
+            "s:yout",
+            "s:Iabs",
+            "s:Iabs:A",
+            "s:Iabs:B",
+            "s:Iabs:C",
+            "c:Ipabs",
+            "c:Ipabs:A",
+            "c:Ipabs:B",
+            "c:Ipabs:C"
+          ]
+        }
+      }
+    },
+    "RelIoc": {
+      "label": "Instantaneous-overcurrent protection blocks",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "Ipset",
+          "Ipsetr",
+          "Tset",
+          "idir"
+        ],
+        "extended": [
+          "loc_name",
+          "outserv",
+          "typ_id",
+          "Ipset",
+          "Ipsetr",
+          "Tset",
+          "idir",
+          "chr_name",
+          "for_name",
+          "dat_src",
+          "fold_id",
+          "iacceptblock",
+          "calcuse",
+          "Trelblock",
+          "cpIpset",
+          "cptotime"
+        ]
+      },
+      "results": {
+        "short_circuit": {
+          "attributes": [
+            "s:yout",
+            "s:Iabs",
+            "s:Iabs:A",
+            "s:Iabs:B",
+            "s:Iabs:C",
+            "c:Ipabs",
+            "c:Ipabs:A",
+            "c:Ipabs:B",
+            "c:Ipabs:C"
+          ],
+          "defaults": [
+            "s:yout",
+            "s:Iabs",
+            "s:Iabs:A",
+            "s:Iabs:B",
+            "s:Iabs:C",
+            "c:Ipabs",
+            "c:Ipabs:A",
+            "c:Ipabs:B",
+            "c:Ipabs:C"
+          ]
+        }
+      }
+    },
     "ElmZpu": {
       "label": "Common impedances",
       "parameters": {
@@ -1537,6 +1713,145 @@
           "doc_id",
           "fold_id",
           "frnom"
+        ]
+      },
+      "results": {}
+    },
+    "TypRelay": {
+      "label": "Protection relay types",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "manuf",
+          "typ_id",
+          "category"
+        ],
+        "extended": [
+          "loc_name",
+          "manuf",
+          "typ_id",
+          "category",
+          "desc",
+          "chr_name",
+          "for_name",
+          "dat_src",
+          "doc_id",
+          "fold_id",
+          "intVersion",
+          "cat_curr",
+          "cat_dist",
+          "cat_diff",
+          "cat_volt",
+          "cat_freq",
+          "iRangeUnit",
+          "pblk",
+          "ptyp"
+        ]
+      },
+      "results": {}
+    },
+    "TypToc": {
+      "label": "Time-overcurrent protection block types",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "sfiec",
+          "sfansi",
+          "iunit",
+          "atype",
+          "Ts",
+          "Kr",
+          "Tr"
+        ],
+        "extended": [
+          "loc_name",
+          "sfiec",
+          "sfansi",
+          "iunit",
+          "atype",
+          "Ts",
+          "Kr",
+          "Tr",
+          "chr_name",
+          "for_name",
+          "dat_src",
+          "fold_id",
+          "rIpset",
+          "irecltarget",
+          "idirpos",
+          "iextstart",
+          "iincTs",
+          "ienabled",
+          "tmcunit",
+          "imcunit",
+          "iinclbreakt",
+          "inegout",
+          "iblockmode",
+          "tshifter",
+          "ishifter",
+          "tmultiplier",
+          "imultiplier",
+          "pIref",
+          "rTadder",
+          "rminresptime",
+          "rTshift",
+          "rTrelblock",
+          "itaddunit",
+          "imrtunit",
+          "cpslayout",
+          "iresetconf",
+          "pcharac",
+          "prcharac"
+        ]
+      },
+      "results": {}
+    },
+    "TypIoc": {
+      "label": "Instantaneous-overcurrent protection block types",
+      "parameters": {
+        "basic": [
+          "loc_name",
+          "sfiec",
+          "sfansi",
+          "iunit",
+          "atype",
+          "Ts",
+          "Kr",
+          "Tr"
+        ],
+        "extended": [
+          "loc_name",
+          "sfiec",
+          "sfansi",
+          "iunit",
+          "atype",
+          "Ts",
+          "Kr",
+          "Tr",
+          "chr_name",
+          "for_name",
+          "dat_src",
+          "fold_id",
+          "rIpset",
+          "irecltarget",
+          "idirpos",
+          "iextstart",
+          "iincTs",
+          "ienabled",
+          "tmcunit",
+          "imcunit",
+          "iinclbreakt",
+          "inegout",
+          "iblockmode",
+          "tshifter",
+          "ishifter",
+          "tmultiplier",
+          "imultiplier",
+          "pIref",
+          "rTset",
+          "rTrelblock",
+          "itunit",
+          "ptref"
         ]
       },
       "results": {}

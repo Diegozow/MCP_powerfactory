@@ -90,6 +90,8 @@ class PFBridge:
                 if fields.get("tool") in ("run_power_flow", "run_short_circuit"):
                     request_id = fields.get("arguments", {}).get("request_id", "unknown")
                     raise BridgeError("CALCULATION_OUTCOME_UNKNOWN", "No calculation response was received for request_id=" + str(request_id) + ". A timeout/disconnection does not cancel Execute. Query get_calculation_status with that ID in the same agent session; do not automatically rerun with a new ID or after a restart.") from exc
+                if fields.get("tool") == "mark_in_graphics":
+                    raise BridgeError("GRAPHIC_MARK_OUTCOME_UNKNOWN", "No highlighting response was received. A timeout does not cancel native graphics work. Inspect the active diagram/highlighting and read get_graphic_selection before retrying; do not automatically restart the agent.") from exc
                 if fields.get("tool") == "export_graphic":
                     raise BridgeError("GRAPHIC_EXPORT_OUTCOME_UNKNOWN", "No graphic-export response was received. A timeout does not cancel export or restoration. Inspect the output file and PowerFactory page/export settings before retrying; do not automatically restart the agent.") from exc
                 if fields.get("tool") == "activate_study_case":
@@ -136,7 +138,7 @@ class PFBridge:
                         or payload.get("tool") != fields.get("tool")
                         or not isinstance(payload.get("data"), dict)
                         or execution.get("source") != "live_powerfactory_session"
-                        or execution.get("read_only") is not (fields.get("tool") not in ("run_power_flow", "run_short_circuit", "capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic") and (fields.get("tool") not in ("save_operation_scenario", "create_operation_scenario") or fields.get("arguments", {}).get("confirmation_digest") is None))
+                        or execution.get("read_only") is not (fields.get("tool") not in ("run_power_flow", "run_short_circuit", "capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic", "mark_in_graphics") and (fields.get("tool") not in ("save_operation_scenario", "create_operation_scenario") or fields.get("arguments", {}).get("confirmation_digest") is None))
                         or execution.get("api_calls_on_script_thread") is not True
                         or type(execution.get("script_thread_id")) is not int
                         or execution.get("api_call_thread_id") != execution.get("script_thread_id")):

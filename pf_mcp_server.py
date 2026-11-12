@@ -137,6 +137,9 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
             "Element listings are calculation-relevant elements for the active study case. "
             "Use an element's exact full_name to read its parameter attributes. "
             "Use get_element_connections for fixed endpoint/cubicle/busbar and switch-state reads on lines, transformers and ElmCoup; physical wiring, switch position and service state are separate. "
+            "Use get_short_circuit_contributions for native bus Ikss/angle and directly connected element-end currents, connection states, current fault settings and validity; no calculation or source tracing is performed. "
+            "Use get_protection_chain for one exact ElmRelay or StaCubic: native protection containment, pelm measurement/block references, pSwitch references and assigned types. Contains is not proof of trip wiring; follow next_offset and check read_complete/errors. "
+            "Use get_graphic_selection for the current network-diagram selection and exact inspectable model paths. Use mark_in_graphics only when highlighting is requested, with the expected diagram/case/agent; it changes UI state, skips absent/unknown symbols and can activate another already open diagram. Highlighting is distinct from selection; inspect observed after-state and do not treat native_call_completed as visual verification. "
             "Use get_feeder_inventory without a path to discover native feeder definitions, then select an exact feeder for membership; valid load-flow results are required and no calculation runs. "
             "Use export_graphic only for an explicit existing SetDeskpage/GrpPage under the active case's Graphics Board and a new PNG/SVG/PDF basename in exports; it creates a standard ComWr once if missing. Check command_created, export_complete and restoration_errors. "
             "Check each attribute's status and unit; an ok call may contain attribute errors. "
@@ -179,7 +182,7 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
 
     def call(tool, arguments):
         try:
-            long_call = tool in ("run_power_flow", "run_short_circuit", "get_calculation_status", "get_line_loading", "capture_result_snapshot", "browse_powerfactory_tree", "activate_study_case", "list_operation_scenarios", "list_network_variations", "list_expansion_stages", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "get_bus_voltage", "get_transformer_loading", "export_results", "set_study_time", "get_power_balance", "get_bus_voltage_sequences", "get_transformer_control_status", "get_element_connections", "get_feeder_inventory", "export_graphic", "save_operation_scenario", "create_operation_scenario")
+            long_call = tool in ("run_power_flow", "run_short_circuit", "get_calculation_status", "get_line_loading", "capture_result_snapshot", "browse_powerfactory_tree", "activate_study_case", "list_operation_scenarios", "list_network_variations", "list_expansion_stages", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "get_bus_voltage", "get_transformer_loading", "export_results", "set_study_time", "get_power_balance", "get_bus_voltage_sequences", "get_transformer_control_status", "get_element_connections", "get_short_circuit_contributions", "get_protection_chain", "get_graphic_selection", "mark_in_graphics", "get_feeder_inventory", "export_graphic", "save_operation_scenario", "create_operation_scenario")
             return bridge.call(tool, arguments, timeout=calculation_timeout if long_call else None)
         except BridgeError as exc:
             raise ToolError(str(exc)) from exc
@@ -592,10 +595,13 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
     ) -> dict[str, Any]:
         """List names/classes/full paths of calculation-relevant elements in the active case.
 
-        Supports 21 classes including terminals, lines, transformers, loads,
+        Supports 24 classes including terminals, lines, transformers, loads,
         synchronous/asynchronous machines (ElmSym/ElmAsm), shunts (ElmShnt), grids (ElmNet/ElmXnet),
         line/cable couplings (ElmTow/ElmCabsys), mutual data (ElmMut), switches,
-        neutral earthing elements and voltage regulators. name_contains is a case-insensitive literal
+        neutral earthing elements, voltage regulators and protection relays (ElmRelay).
+        Protection blocks RelToc (time overcurrent) and RelIoc (instantaneous
+        overcurrent) are included, even when nested inside relay objects.
+        name_contains is a case-insensitive literal
         substring of the name. Results are sorted by name/full path. Use the
         returned next_offset for the next page; None means no further page.
 
@@ -665,6 +671,54 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
             "object_class": object_class, "name_contains": name_contains, "offset": offset, "limit": limit,
         })
 
+    @server.tool(title="Read the active diagram selection and model identities", annotations=annotations)
+    def get_graphic_selection(
+        offset: Annotated[int, Field(ge=0, le=1000000, strict=True)] = 0,
+        limit: Annotated[int, Field(ge=1, le=50, strict=True)] = 50,
+    ) -> dict[str, Any]:
+        """Read the top network diagram's native selection without changing the UI.
+
+        Returns exact SetDeskpage and IntGrfnet identities and selected objects.
+        IntGrf selections follow only their native pDataObj link; annotations,
+        unsupported classes and non-calculation-relevant model objects remain
+        explicit. Pass inspection.full_name to existing attribute/type/connection
+        tools only when inspection.available is true. Copy diagram.full_name
+        and the session's study case/agent identity for a later highlight request.
+        Follow next_offset and check read_complete and per-object mapping errors.
+        A missing diagram is an explicit error, distinct from an empty selection.
+        No page opening, selection change, model edit or calculation. The current
+        synchronous agent keeps the GUI busy; select before launching if needed.
+        """
+        return call("get_graphic_selection", {"offset": offset, "limit": limit})
+
+    @server.tool(title="Highlight exact model elements in open diagrams", annotations=calculation_annotations)
+    def mark_in_graphics(
+        full_names: Annotated[list[FullName], Field(min_length=1, max_length=8)],
+        expected_diagram_full_name: FullName,
+        expected_study_case_full_name: FullName,
+        expected_agent_instance_id: Annotated[str, Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")],
+    ) -> dict[str, Any]:
+        """Highlight 1-8 exact supported model elements only when requested.
+
+        Copy diagram.full_name from get_graphic_selection and case/agent identity
+        from the active session. Preflights every exact calculation-relevant
+        target and its symbols in the active network diagram. Only present
+        targets reach Application.MarkInGraphics(objects, 1); absent or unknown
+        symbols are reported/skipped. No symbol or electrical object is created.
+
+        The native method searches open diagrams and may activate one. Returns
+        the observed selection/context afterward; selection and highlighting
+        are separate facts. Native completion is not visual verification and
+        highlight_verified remains unknown. Check errors, mark_attempted,
+        native_call_completed and the before/after diagram/context. After a
+        timeout inspect the UI and read selection before retrying. No settings
+        write, calculation or save is requested. This tool changes UI state.
+        """
+        return call("mark_in_graphics", {"full_names": full_names,
+                    "expected_diagram_full_name": expected_diagram_full_name,
+                    "expected_study_case_full_name": expected_study_case_full_name,
+                    "expected_agent_instance_id": expected_agent_instance_id})
+
     @server.tool(title="Export an existing PowerFactory diagram or plot", annotations=calculation_annotations)
     def export_graphic(
         page_full_name: FullName,
@@ -714,6 +768,58 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
         energisation assessment, switching, parameter changes or calculation.
         """
         return call("get_element_connections", {"full_name": full_name})
+
+    @server.tool(title="Read native protection relationships and assigned types", annotations=annotations)
+    def get_protection_chain(
+        full_name: FullName,
+        offset: Annotated[int, Field(ge=0, le=1000000, strict=True)] = 0,
+        limit: Annotated[int, Field(ge=1, le=50, strict=True)] = 50,
+    ) -> dict[str, Any]:
+        """Inspect one exact ElmRelay or StaCubic in the active project, read-only.
+
+        Copy a relay path from list_model_elements or a cubicle path from the
+        tree/connection tools. Enumerates nested relays and Rel* blocks, native
+        pelm references to CT/VT/measurement blocks, explicit pSwitch references
+        from RelLogdip/RelLogic, available settings and one assigned-type hop.
+        Preserves native values, units, null references and zero-based array slots.
+        Contains edges describe physical/model containment, never inferred trip
+        wiring. Other referenced classes/projects remain metadata only.
+
+        Pagination selects nodes and their outgoing relationships; targets can
+        appear on another page. Follow next_offset. The traversal has a fixed
+        500-object limit; select a narrower relay if exceeded. read_complete
+        covers the supported read scope, not the completeness of protection
+        logic. Inspect errors, per-attribute status and excluded_attributes.
+        No logic evaluation, calculation, creation, settings write or save.
+        """
+        return call("get_protection_chain", {"full_name": full_name, "offset": offset, "limit": limit})
+
+    @server.tool(title="Read native short-circuit contributions at a bus", annotations=annotations)
+    def get_short_circuit_contributions(
+        bus_full_name: FullName,
+        offset: Annotated[int, Field(ge=0, le=1000000, strict=True)] = 0,
+        limit: Annotated[int, Field(ge=1, le=50, strict=True)] = 50,
+    ) -> dict[str, Any]:
+        """Read existing bus Ikss/angle and currents at directly connected element ends.
+
+        Copy an exact ElmTerm full_name from list_model_elements. Reads native
+        m:Ikss/m:phii at the bus and m:Ikss:<side>/m:phii:<side> at matching
+        physical terminals, with original units, descriptions and errors.
+        Supports lines, two/three-winding transformers, couplers, synchronous/
+        asynchronous machines, static generators and external grids. Other
+        connected classes are listed as unsupported; follow next_offset.
+
+        Returns physical endpoints, switch/service states, before/after native
+        short-circuit validity and existing ComShc settings. Open/out-of-service
+        elements and readable invalid/unknown results remain visible. Current
+        settings do not establish which settings produced the stored results or
+        prove that this bus was faulted. All-bus/multiple-fault results are not
+        contributions to a single fault. Scalar fields retain native signs/angles;
+        no phase conversion, phasor sum, source tracing or calculation is done.
+        Check per-end status, read_complete, coverage_complete and validity.
+        """
+        return call("get_short_circuit_contributions", {"bus_full_name": bus_full_name,
+                                                       "offset": offset, "limit": limit})
 
     @server.tool(title="Read native network power balance", annotations=annotations)
     def get_power_balance(network_full_name: FullName | None = None) -> dict[str, Any]:
@@ -892,14 +998,19 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
         Omit attributes for defaults: ElmTerm reads loc_name, uknom, outserv;
         ElmLne reads loc_name, dline, outserv, typ_id. ElmTr2 adds parallel count,
         tap/control/rating factor, and HV/LV cubicle references; ElmTr3 adds
-        parallel count, HV/MV/LV tap positions and cubicle references. Other
-        New classes have compact class-specific defaults. profile=extended checks
+        parallel count, HV/MV/LV tap positions and cubicle references. ElmRelay
+        reads loc_name, outserv, typ_id and actset. RelToc/RelIoc add pickup,
+        direction and time settings (Tpset/Tset); RelToc also reads pcharac.
+        Other classes have compact class-specific defaults. profile=extended checks
         the broader parameter candidates with HasAttribute, reads the available
         ones, and reports excluded names and availability-check errors.
         With attributes omitted, include_results=true adds calculation defaults
         only when the native validity flag is true. calculation selects all,
         power_flow or short_circuit. Invalid/unknown state and absent profiles are
         explicit skips in result_selection; inspect its before/after state.
+        For ElmRelay, valid short-circuit defaults include c:yout (tripping time)
+        where available. RelToc/RelIoc use s:yout and available scalar/phase
+        s:Iabs and c:Ipabs current results; missing variants are explicit exclusions.
         rms requires an ElmRes time-series reader and is rejected here.
         Custom lists contain 1-100 unique direct names. Existing m:/c:/s: results
         may be read explicitly; they can be unavailable or stale. Reference
@@ -920,7 +1031,7 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
         attributes: AttributeList | None = None,
         profile: Profile = "basic",
     ) -> dict[str, Any]:
-        """Read the type currently assigned to a listed line or transformer through typ_id.
+        """Read the type currently assigned to a listed model element through typ_id.
 
         full_name is the SOURCE element path copied from
         list_model_elements, not the equipment-type library path. The source is
@@ -931,9 +1042,15 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
         ratings, voltages, impedance-test/loss data, winding connections/clock
         number and tap-range parameters. TypTr3 returns HV/MV/LV ratings and
         voltages, three impedance-test/loss entries and winding connections/clock
-        numbers. Other allowed line types (TypTow/TypGeo/TypCabsys) default to
+        numbers. TypRelay returns the name, manufacturer, relay-definition
+        reference and category; extended adds version, function flags and block
+        references. Definition/block references remain metadata without recursion.
+        RelToc and RelIoc sources resolve strictly to TypToc and TypIoc. Their
+        basic type profiles read IEC/ANSI symbols, current unit, model identifier,
+        Ts, Kr and Tr; extended adds ranges, reset/blocking options and references.
+        Other allowed line types (TypTow/TypGeo/TypCabsys) default to
         loc_name only with basic profiles. Extended profiles also cover machine,
-        load, tower and cable-system type candidates, checked with HasAttribute.
+        load, relay, tower and cable-system type candidates, checked with HasAttribute.
         A listed element without typ_id or an assigned type returns an explicit
         error. Line assignments may reference ElmTow/ElmCabsys coupling objects;
         these return reference_kind=coupling_element and are read one hop only.
@@ -952,7 +1069,7 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
     ) -> dict[str, Any]:
         """Read class counts and exact-path samples in the live calculation-relevant model.
 
-        Omit element_classes to query all 21 supported classes. Empty classes and
+        Omit element_classes to query all 24 supported classes. Empty classes and
         individual class-query errors are reported explicitly. sample_limit=0
         returns counts only. This does not activate grids or search inactive projects.
         """

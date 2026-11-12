@@ -40,7 +40,7 @@ def load_profiles(path):
                         and name.startswith(("m:", "c:", "s:")) == results for name in names)
                 and len(set(names)) == len(names))
 
-    for group, prefix in (("elements", "Elm"), ("types", "Typ")):
+    for group, prefix in (("elements", "(?:Elm|Rel)"), ("types", "Typ")):
         profiles = data.get(group)
         if not isinstance(profiles, dict) or (group == "elements" and not profiles):
             raise ValueError("Missing class profiles: " + group)
@@ -79,6 +79,9 @@ EQUIPMENT_TYPE_CLASSES = {
     "ElmSym": ("TypSym",),
     "ElmAsm": ("TypAsm", "TypAsmo"),
     "ElmLod": ("TypLod",),
+    "ElmRelay": ("TypRelay",),
+    "RelToc": ("TypToc",),
+    "RelIoc": ("TypIoc",),
     "ElmTow": ("TypTow", "TypGeo"),
     "ElmCabsys": ("TypCabsys", "TypCab"),
 }
@@ -92,7 +95,7 @@ CALCULATION_SETTINGS = {
 REQUEST_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_-]{7,79}"
 SNAPSHOT_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}"
 VOLTAGE_QUANTITIES = {"positive_sequence": "m:u1", "phase_a": "m:u:A", "phase_b": "m:u:B", "phase_c": "m:u:C", "scalar": "m:u"}
-IMPLEMENTATION_VERSION = "0.15.0"
+IMPLEMENTATION_VERSION = "0.18.0"
 SUPPORTED_TOOLS = (
     "get_active_session", "get_active_scenario", "list_operation_scenarios", "browse_powerfactory_tree", "activate_study_case",
     "list_network_variations", "activate_network_variation", "deactivate_network_variation",
@@ -104,10 +107,17 @@ SUPPORTED_TOOLS = (
     "set_study_time", "get_power_balance", "get_bus_voltage_sequences", "get_transformer_control_status",
     "list_expansion_stages",
     "get_element_connections",
+    "get_short_circuit_contributions",
+    "get_protection_chain",
+    "get_graphic_selection", "mark_in_graphics",
     "get_feeder_inventory", "export_graphic",
     "save_operation_scenario", "create_operation_scenario",
 )
 SOURCE_FILES = ("pf_agent.py", "pf_model.py", "pf_connection.py", "pf_profiles.json")
+CONNECTION_SIDES = {"ElmLne": ("bus1", "bus2"), "ElmTr2": ("bushv", "buslv"),
+                    "ElmTr3": ("bushv", "busmv", "buslv"), "ElmCoup": ("bus1", "bus2"),
+                    "ElmSym": ("bus1",), "ElmXnet": ("bus1",),
+                    "ElmGenstat": ("bus1",), "ElmAsm": ("bus1",)}
 LOADED_SOURCES = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                   if Path(__file__).with_name(name).exists() else None for name in SOURCE_FILES}
 
@@ -182,7 +192,8 @@ def active_context(app, info=None):
 
 def powerfactory_capabilities(app):
     methods = ("GetActiveScenario", "GetActiveNetworkVariations", "GetRecordingStage", "GetStudyTimeObject",
-               "GetInstallationDirectory", "GetInterfaceVersion", "GetCalcRelevantObjects", "IsLdfValid", "IsShcValid", "IsRmsValid")
+               "GetInstallationDirectory", "GetInterfaceVersion", "GetCalcRelevantObjects", "IsLdfValid", "IsShcValid", "IsRmsValid",
+               "GetDesktop", "GetCurrentDiagram", "GetDiagramSelection", "MarkInGraphics")
     data = {"implementation_version": IMPLEMENTATION_VERSION, "supported_tools": list(SUPPORTED_TOOLS),
             "supported_element_classes": list(ELEMENT_CLASSES),
             "loaded_sources": LOADED_SOURCES, "python_version": sys.version.split()[0],
@@ -329,6 +340,27 @@ def validate_arguments(tool, arguments):
             raise RequestError("INVALID_ARGUMENTS", "Select a feeder before applying member-class or nested-feeder options.")
         return {**validate_page({"limit": 20, **arguments}, 50), "feeder_full_name": path,
                 "include_nested": nested, "object_class": object_class}
+    if tool == "get_graphic_selection":
+        if set(arguments) - {"offset", "limit"}:
+            raise RequestError("INVALID_ARGUMENTS", "Use only offset and limit for the current diagram selection.")
+        return validate_page(arguments, 50)
+    if tool == "mark_in_graphics":
+        required = {"full_names", "expected_diagram_full_name", "expected_study_case_full_name", "expected_agent_instance_id"}
+        if set(arguments) != required:
+            raise RequestError("INVALID_ARGUMENTS", "Provide exact element paths, expected diagram, study case and agent ID.")
+        paths = arguments["full_names"]
+        if (not isinstance(paths, list) or not 1 <= len(paths) <= 8
+                or any(not isinstance(path, str) for path in paths) or len(set(paths)) != len(paths)):
+            raise RequestError("INVALID_ARGUMENTS", "Use 1-8 unique supported model-element paths.")
+        paths = [validate_path(path)["full_name"] for path in paths]
+        diagram = validate_full_path(arguments["expected_diagram_full_name"], "IntGrfnet")
+        case = validate_full_path(arguments["expected_study_case_full_name"], "IntCase")
+        if any(part in ("", ".", "..") for path in [*paths, diagram, case] for part in path.split("\\")[1:]) or any(char in path for path in [*paths, diagram, case] for char in "*?"):
+            raise RequestError("INVALID_ARGUMENTS", "Use exact paths without wildcards, relative or empty segments.")
+        instance = arguments["expected_agent_instance_id"]
+        if not isinstance(instance, str) or re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", instance) is None:
+            raise RequestError("INVALID_ARGUMENTS", "Copy the current expected_agent_instance_id exactly.")
+        return {**arguments, "full_names": paths}
     if tool == "export_graphic":
         if set(arguments) - {"page_full_name", "command_full_name", "file_name"} or not {"page_full_name", "file_name"} <= set(arguments):
             raise RequestError("INVALID_ARGUMENTS", "Provide an exact graphic page and a new PNG, SVG or PDF filename.")
@@ -388,6 +420,24 @@ def validate_arguments(tool, arguments):
         if any(part in ("", ".", "..") for part in path["full_name"].split("\\")[1:]):
             raise RequestError("INVALID_ARGUMENTS", "Use an exact listed path without relative or empty segments.")
         return path
+    if tool == "get_protection_chain":
+        if "full_name" not in arguments or set(arguments) - {"full_name", "offset", "limit"}:
+            raise RequestError("INVALID_ARGUMENTS", "Provide one exact relay or cubicle full_name and optional offset/limit.")
+        path = arguments["full_name"]
+        cls = path.rsplit(".", 1)[-1] if isinstance(path, str) else ""
+        if cls not in ("ElmRelay", "StaCubic"):
+            raise RequestError("INVALID_ARGUMENTS", "Select an ElmRelay or StaCubic.")
+        validate_full_path(path, cls)
+        if any(part in ("", ".", "..") for part in path.split("\\")[1:]) or any(char in path for char in "*?"):
+            raise RequestError("INVALID_ARGUMENTS", "Use an exact path without wildcards, relative or empty segments.")
+        return {"full_name": path, "element_class": cls, **validate_page(arguments, 50)}
+    if tool == "get_short_circuit_contributions":
+        if "bus_full_name" not in arguments or set(arguments) - {"bus_full_name", "offset", "limit"}:
+            raise RequestError("INVALID_ARGUMENTS", "Provide one exact bus_full_name and optional offset/limit.")
+        path = validate_full_path(arguments["bus_full_name"], "ElmTerm")
+        if any(part in ("", ".", "..") for part in path.split("\\")[1:]):
+            raise RequestError("INVALID_ARGUMENTS", "Use an exact listed bus path without relative or empty segments.")
+        return {"bus_full_name": path, **validate_page(arguments, 50)}
     if tool == "activate_operation_scenario":
         allowed = {"scenario_full_name", "expected_study_case_full_name", "expected_agent_instance_id",
                    "expected_active_scenario_full_name", "discard_unsaved_changes"}
@@ -813,6 +863,139 @@ def select_current_results(app, obj, object_class, calculation):
                                        "selections": selections, "skipped_calculations": skipped}
 
 
+def active_network_graphic(app, info):
+    """Resolve the shown tab and its native diagram reference without opening pages."""
+    desktop = app.GetDesktop()
+    page = desktop.GetActivePage() if desktop is not None else None
+    diagram = app.GetCurrentDiagram()
+    if not page or not diagram:
+        raise RequestError("NO_ACTIVE_DIAGRAM", "Show an existing network diagram before using graphics tools.", 409)
+    page_info, diagram_info = describe(page), describe(diagram)
+    if page_info["class"] != "SetDeskpage" or diagram_info["class"] != "IntGrfnet":
+        raise RequestError("UNSUPPORTED_GRAPHIC_PAGE", "The active page must be a network diagram, not a plot.", 409)
+    if (not page_info["full_name"].startswith(info["study_case"]["full_name"] + "\\")
+            or not diagram_info["full_name"].startswith(info["project"]["full_name"] + "\\")):
+        raise RequestError("GRAPHIC_OUT_OF_SCOPE", "The shown tab/diagram must belong to the active study case/project.", 409)
+    if describe(page.GetAttribute("pGrph")) != diagram_info:
+        raise RequestError("GRAPHIC_CONTEXT_MISMATCH", "The shown tab and current diagram do not refer to the same graphic.", 409)
+    return page_info, diagram_info, diagram
+
+
+def get_graphic_selection(app, info, arguments):
+    context = active_context(app, info)
+    page, diagram, _ = active_network_graphic(app, info)
+    selected = app.GetDiagramSelection()
+    if not isinstance(selected, (list, tuple)) or any(obj is None for obj in selected):
+        raise RequestError("GRAPHIC_SELECTION_UNAVAILABLE", "GetDiagramSelection did not return a native object list.", 409)
+    identities = [describe(obj) for obj in selected]
+    offset, limit = arguments["offset"], arguments["limit"]
+    entries, cache = [], {}
+    for index, obj in enumerate(selected[offset:offset + limit], offset):
+        identity = identities[index]
+        model, mapping_error = None, None
+        source = "GetDiagramSelection"
+        try:
+            if identity["class"] == "IntGrf":
+                source = "IntGrf.pDataObj"
+                model = obj.GetAttribute("pDataObj")
+            elif identity["class"].startswith(("Elm", "Rel", "Sta")):
+                model = obj
+            model_info = describe(model)
+            if model_info is None:
+                inspection = {"available": False, "reason": "NO_MODEL_REFERENCE"}
+            elif not model_info["full_name"].startswith(info["project"]["full_name"] + "\\"):
+                inspection = {"available": False, "reason": "OUTSIDE_ACTIVE_PROJECT"}
+            elif model_info["class"] not in ELEMENT_CLASSES:
+                inspection = {"available": False, "reason": "UNSUPPORTED_INSPECTION_CLASS"}
+            else:
+                try:
+                    resolve_element(app, {"full_name": model_info["full_name"], "element_class": model_info["class"]}, cache)
+                    inspection = {"available": True, "full_name": model_info["full_name"]}
+                except RequestError as exc:
+                    inspection = {"available": False, "reason": exc.code}
+        except Exception as exc:
+            model_info = None
+            mapping_error = (type(exc).__name__ + ": " + str(exc))[:320]
+            inspection = {"available": None, "reason": "SELECTION_MAPPING_FAILED"}
+        entries.append({"index": index, "selected_object": identity, "model_element": model_info,
+                        "mapping_source": source, "mapping_error": mapping_error, "inspection": inspection})
+    after_page, after_diagram, _ = active_network_graphic(app, info)
+    if (active_context(app) != context or page != after_page or diagram != after_diagram
+            or [describe(obj) for obj in app.GetDiagramSelection()] != identities):
+        raise RequestError("GRAPHIC_SELECTION_CHANGED", "The active context, diagram or selection changed during the read; query again.", 409)
+    response = {**info, "context": context, "page": page, "diagram": diagram, "selection": entries,
+                "selected_count": len(selected), "returned_count": len(entries), "offset": offset, "limit": limit,
+                "next_offset": offset + len(entries) if offset + len(entries) < len(selected) else None,
+                "read_complete": all(item["mapping_error"] is None for item in entries),
+                "source": "Application.GetDiagramSelection",
+                "note": "This is the native selection in the top diagram, not the browser or script-launch selection. Use inspection.full_name with existing attribute/type/connection tools only when inspection.available is true. Annotations, unsupported classes and non-calculation-relevant objects remain explicit. No selection change, page opening, model edit or calculation. The current synchronous agent keeps the GUI busy; the selection may need to be made before launching it."}
+    if len(json.dumps(response, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 786432:
+        raise RequestError("GRAPHIC_RESPONSE_TOO_LARGE", "Selection metadata exceeds the response budget; request a smaller page.", 409)
+    return response
+
+
+def mark_in_graphics(app, instance_id, info, arguments):
+    if arguments["expected_agent_instance_id"] != instance_id:
+        raise RequestError("INSTANCE_MISMATCH", "The agent changed; read the active session again.", 409)
+    if arguments["expected_study_case_full_name"] != info["study_case"]["full_name"]:
+        raise RequestError("STUDY_CASE_MISMATCH", "The study case changed; read the active session again.", 409)
+    context = active_context(app, info)
+    if not context["context_complete"]:
+        raise RequestError("CONTEXT_INCOMPLETE", "Resolve the active-context errors before highlighting.", 409)
+    page, diagram, graphic = active_network_graphic(app, info)
+    if diagram["full_name"] != arguments["expected_diagram_full_name"]:
+        raise RequestError("GRAPHIC_CONTEXT_MISMATCH", "The active diagram changed; read its selection again.", 409)
+    cache = {}
+    targets = [resolve_element(app, validate_path(path), cache) for path in arguments["full_names"]]
+    symbols, errors, error_count = {}, [], 0
+    for obj in graphic.GetContents("*.IntGrf", 1) or []:
+        try:
+            symbol = describe(obj)
+            if not symbol["full_name"].startswith(diagram["full_name"] + "\\"):
+                raise ValueError("A graphic object was outside the active diagram.")
+            model = obj.GetAttribute("pDataObj")
+            if model is not None:
+                symbols.setdefault(str(model.GetFullName()), []).append(symbol)
+        except Exception as exc:
+            error_count += 1
+            if len(errors) < 50:
+                errors.append({"operation": "IntGrf.pDataObj", "error": (type(exc).__name__ + ": " + str(exc))[:320]})
+    rows = [{"element": describe(obj), "graphics": symbols.get(str(obj.GetFullName()), []),
+             "presence": "present" if str(obj.GetFullName()) in symbols else "unknown" if errors else "absent"}
+            for obj in targets]
+    eligible = [obj for obj, row in zip(targets, rows) if row["presence"] == "present"]
+    if len(json.dumps({"context": context, "elements": rows}, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 262144:
+        raise RequestError("GRAPHIC_RESPONSE_TOO_LARGE", "Graphic/context metadata exceeds the preparation budget; select fewer elements. Nothing was marked.", 409)
+    check_page, check_diagram, _ = active_network_graphic(app, info)
+    if active_context(app) != context or check_page != page or check_diagram != diagram:
+        raise RequestError("GRAPHIC_CONTEXT_MISMATCH", "Context or diagram changed during preparation; nothing was marked.", 409)
+    completed, error = False, None
+    if eligible:
+        try:
+            app.MarkInGraphics(eligible, 1)
+            completed = True
+        except Exception as exc:
+            error = {"code": "GRAPHIC_MARK_OUTCOME_UNKNOWN", "message": (type(exc).__name__ + ": " + str(exc))[:320]}
+    after, observation_error = None, None
+    try:
+        after = get_graphic_selection(app, session_info(app), {"offset": 0, "limit": 50})
+    except Exception as exc:
+        observation_error = (type(exc).__name__ + ": " + str(exc))[:320]
+    response = {**info, "context_before": context, "page_before": page, "diagram_before": diagram,
+            "elements": rows, "eligible_count": len(eligible), "mark_attempted": bool(eligible),
+            "native_call_completed": completed, "error": error, "graphic_read_errors": errors,
+            "graphic_read_error_count": error_count, "graphic_read_errors_truncated": error_count > len(errors),
+            "selection_after": after, "observation_error": observation_error,
+            "active_context_unchanged": after["context"] == context if after is not None else None,
+            "active_diagram_unchanged": after["diagram"] == diagram and after["page"] == page if after is not None else None,
+            "highlight_verified": None, "effect": "UI highlighting and possible activation of an already open diagram",
+            "note": "Only explicitly requested elements with symbols in the initial active diagram are passed to MarkInGraphics(objects, 1). Absent/unknown elements are skipped; no symbols or electrical objects are created. The native method searches open diagrams and returns no highlight-verification result; native_call_completed is not visual confirmation. selection_after reports actual native selection, which is distinct from highlighting. Inspect before retrying after an exception/timeout. No settings, calculation or save is requested."}
+    if len(json.dumps(response, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 786432:
+        response["selection_after"] = None
+        response["observation_error"] = "Selection metadata omitted to preserve the operation outcome within the response budget; call get_graphic_selection separately."
+    return response
+
+
 def export_graphic(app, info, arguments):
     context = active_context(app, info)
     if not context["context_complete"]:
@@ -977,11 +1160,10 @@ def get_feeder_inventory(app, info, arguments):
             "note": "Definitions are native ElmFeeder objects under the active project's Network Data. Membership uses existing valid load-flow results; invalid/unknown validity leaves counts unknown, not zero. Counts cover all native members before class/name filtering and pagination. Nested feeders are included only when requested. No membership is inferred from folder names and no topology trace, calculation or model write is performed."}
 
 
-def get_element_connections(app, info, arguments):
-    obj = resolve_element(app, arguments)
+def get_element_connections(app, info, arguments, obj=None):
+    obj = resolve_element(app, arguments) if obj is None else obj
     context = active_context(app, info)
-    sides = {"ElmLne": ("bus1", "bus2"), "ElmTr2": ("bushv", "buslv"),
-             "ElmTr3": ("bushv", "busmv", "buslv"), "ElmCoup": ("bus1", "bus2")}[arguments["element_class"]]
+    sides = CONNECTION_SIDES[arguments["element_class"]]
 
     def switch_state(switch):
         data = {"switch": describe(switch), "on_off": read_attribute(switch, "on_off"), "closed": None, "error": None}
@@ -1049,6 +1231,70 @@ def get_element_connections(app, info, arguments):
                                "terminal_considering_switches": "GetNode(bus_index, 1)", "busbar": "StaCubic.cBusBar",
                                "switch_closed": "ElmCoup/StaSwitch.IsClosed", "in_service": "element.outserv == 0"},
             "note": "Direct terminals/cubicles, resolved busbars, switch-aware node reads, switch positions and the element's own service flag are separate facts. Null read states with errors are unknown; a successful GetNode returning None means no node was found. An empty cubicle-switch list does not cover every series switch in a detailed substation. This is endpoint inspection, not a path/energisation or power-flow assessment. No switch, service state or model data is changed and no calculation is run."}
+
+
+def get_short_circuit_contributions(app, info, arguments):
+    bus_path = arguments["bus_full_name"]
+    bus = resolve_element(app, {"full_name": bus_path, "element_class": "ElmTerm"})
+    context = active_context(app, info)
+    before = calculation_validity(app, "short_circuit")
+    bus_data = attribute_data(bus, ["uknom", "outserv", "m:Ikss", "m:phii"], 8192)
+    commands = list_calculation_commands(app, info, {"calculation": "short_circuit", "offset": 0,
+                                                   "limit": 20, "settings_attributes": None})
+    connected = {str(obj.GetFullName()): obj for obj in bus.GetConnectedElements(0, 0, 0) or [] if obj is not None}
+    entries, unsupported = [], []
+    for path, obj in sorted(connected.items()):
+        identity = describe(obj)
+        if identity["class"] not in CONNECTION_SIDES:
+            unsupported.append(identity)
+        else:
+            entries.append((identity, obj))
+    offset, limit = arguments["offset"], arguments["limit"]
+    rows = []
+    for identity, obj in entries[offset:offset + limit]:
+        row = {"element": identity, "bus_ends": [], "read_complete": False}
+        try:
+            connection = get_element_connections(app, info, {"full_name": identity["full_name"],
+                                                  "element_class": identity["class"]}, obj=obj)
+            row.update({key: connection[key] for key in ("outserv", "in_service", "switch_state", "connections")})
+            for end in connection["connections"]:
+                if end["terminal"] is not None and end["terminal"]["full_name"] == bus_path:
+                    side = end["connection_attribute"]
+                    row["bus_ends"].append({"bus_index": end["bus_index"], "connection_attribute": side,
+                                            **attribute_data(obj, ["m:Ikss:" + side, "m:phii:" + side], 8192)})
+            row["read_complete"] = bool(connection["read_complete"] and row["bus_ends"]
+                                        and all(end["all_attributes_read"] and not end["metadata_error_count"]
+                                                for end in row["bus_ends"]))
+            if not row["bus_ends"]:
+                row["error"] = {"code": "NO_DIRECT_TERMINAL_MATCH",
+                                "message": "No physical endpoint matched the selected bus; no current end was inferred."}
+        except RequestError as exc:
+            if exc.code == "SESSION_CHANGED":
+                raise
+            row["error"] = {"code": exc.code, "message": str(exc)}
+        except Exception as exc:
+            row["error"] = {"code": "CONNECTION_READ_FAILED", "message": (type(exc).__name__ + ": " + str(exc))[:320]}
+        rows.append(row)
+    if active_context(app, info) != context:
+        raise RequestError("SESSION_CHANGED", "The active context changed during the short-circuit contribution read.", 409)
+    after = calculation_validity(app, "short_circuit")
+    following = offset + len(rows)
+    settings_complete = (not commands["class_query_errors"] and commands["next_offset"] is None
+                         and all(item["settings"]["all_attributes_read"] and not item["settings"]["metadata_error_count"]
+                                 and not item["settings"]["availability_errors"] for item in commands["commands"]))
+    return {**info, "context": context, "bus": describe(bus), "bus_data": bus_data,
+            "validity_before": before, "validity_after": after, "short_circuit_commands": commands,
+            "connection_source": "ElmTerm.GetConnectedElements(0, 0, 0)",
+            "supported_connection_classes": list(CONNECTION_SIDES), "unsupported_elements": unsupported,
+            "connected_element_count": len(connected), "matched_count": len(entries), "returned_count": len(rows),
+            "offset": offset, "limit": limit, "next_offset": following if following < len(entries) else None,
+            "contributions": rows,
+            "coverage_complete": context["context_complete"] and not unsupported and offset == 0 and following >= len(entries)
+                                 and all(row["bus_ends"] for row in rows),
+            "read_complete": bool(context["context_complete"] and bus_data["all_attributes_read"]
+                                  and not bus_data["metadata_error_count"] and settings_complete
+                                  and all(row["read_complete"] for row in rows)),
+            "results_note": "Existing scalar Ikss and phase-angle values with native units/sign conventions; readable values are retained even when validity is false or unknown. Connections include open switches and out-of-service elements. Only exact physical terminal matches select current ends; resolved busbars are reported separately. Current command settings do not prove the settings used for stored results or that the selected bus was faulted. All-bus/multiple-fault results must not be interpreted as contributions to one fault. No phase conversion, current reversal, sum, percentage, source/path tracing, model change or calculation is performed."}
 
 
 def get_element_attributes(app, info, arguments, obj=None, response_budget=ATTRIBUTE_RESPONSE_BUDGET):
@@ -2266,12 +2512,160 @@ def browse_powerfactory_tree(app, arguments):
     return response
 
 
+def get_protection_chain(app, info, arguments):
+    """Read a bounded protection graph; containment is distinct from signal wiring."""
+    context = active_context(app, info)
+    project_path = info["project"]["full_name"]
+    path = arguments["full_name"]
+    if not path.startswith(project_path + "\\"):
+        raise RequestError("PROTECTION_OUT_OF_SCOPE", "Select a relay or cubicle inside the active project.", 403)
+    if arguments["element_class"] == "ElmRelay":
+        root = resolve_element(app, arguments)
+    else:
+        root, current = app.GetActiveProject(), project_path
+        for part in path[len(project_path) + 1:].split("\\"):
+            current += "\\" + part
+            matches = [obj for obj in root.GetContents("*", 0) or []
+                       if obj is not None and str(obj.GetFullName()) == current]
+            if len(matches) != 1:
+                raise RequestError("CUBICLE_NOT_FOUND", "The exact cubicle path is missing or ambiguous; browse again.", 404)
+            root = matches[0]
+    if str(root.GetClassName()) != arguments["element_class"]:
+        raise RequestError("ELEMENT_CLASS_MISMATCH", "The resolved protection root does not match its path.", 409)
+
+    fields = {
+        "ElmRelay": ("outserv", "actset", "ctprim", "ctsec", "vtprim", "vtsec", "pelm"),
+        "StaCt": ("outserv", "ptapset", "stapset", "pbranch", "iorient"),
+        "StaVt": ("outserv", "ptapset", "stapset", "pbusbar"),
+        "StaCubic": ("obj_id", "obj_bus"), "StaSwitch": ("on_off", "iUse"),
+        "ElmCoup": ("outserv", "on_off"),
+        "RelLogdip": ("outserv", "pSwitch", "sLogic", "sTripsig", "iout"),
+        "RelLogic": ("outserv", "pSwitch"), "RelMultiset": ("outserv", "pelm"),
+    }
+    reference_fields = {"ElmRelay": "pelm", "RelMultiset": "pelm",
+                        "RelLogdip": "pSwitch", "RelLogic": "pSwitch"}
+
+    def supported(cls):
+        return cls in fields or cls.startswith("Rel")
+
+    pending, discovered, nodes, relationships, errors = [root], set(), [], [], []
+
+    def add(obj):
+        full_name = str(obj.GetFullName())
+        if full_name in discovered:
+            return False
+        if len(discovered) >= 500:
+            raise RequestError("PROTECTION_CHAIN_TOO_LARGE", "More than 500 protection objects; select a narrower relay.", 409)
+        discovered.add(full_name)
+        return True
+
+    def failure(obj, operation, exc):
+        errors.append({"object": describe(obj), "operation": operation,
+                       "error": (type(exc).__name__ + ": " + str(exc))[:320]})
+
+    add(root)
+    for obj in pending:
+        identity = describe(obj)
+        cls = identity["class"]
+        names = list(dict.fromkeys(("typ_id", *fields.get(cls, DEFAULT_ATTRIBUTES.get(cls, ("outserv",))))))
+        attributes, excluded = {}, []
+        for name in names:
+            try:
+                if not obj.HasAttribute(name):
+                    excluded.append(name)
+                    continue
+                attributes[name] = read_attribute(obj, name)
+            except Exception as exc:
+                failure(obj, "HasAttribute:" + name, exc)
+        node = {"object": identity, "attributes": attributes, "excluded_attributes": excluded,
+                "equipment_type": None}
+        assigned = attributes.get("typ_id", {})
+        if assigned.get("status") == "ok" and assigned.get("value") is not None:
+            try:
+                typ = obj.GetAttribute("typ_id")
+                if json_attribute_value(typ) != assigned["value"]:
+                    raise ValueError("Assigned type changed during the read.")
+                type_class = str(typ.GetClassName())
+                type_names = TYPE_DEFAULT_ATTRIBUTES.get(type_class, {
+                    "TypCt": ("loc_name", "primtaps", "sectaps"),
+                    "TypVt": ("loc_name", "primtaps", "Uinom"),
+                }.get(type_class, ("loc_name",)))
+                node["equipment_type"] = {"object": describe(typ), **attribute_data(typ, list(type_names))}
+            except Exception as exc:
+                failure(obj, "typ_id", exc)
+        nodes.append(node)
+        ref_name = reference_fields.get(cls)
+        if ref_name and attributes.get(ref_name, {}).get("status") == "ok":
+            try:
+                raw = obj.GetAttribute(ref_name)
+                if json_attribute_value(raw) != attributes[ref_name]["value"]:
+                    raise ValueError("Protection references changed during the read.")
+                for index, target in enumerate(raw if isinstance(raw, (list, tuple)) else [raw]):
+                    target_info = describe(target)
+                    expandable = (target_info is not None and supported(target_info["class"])
+                                  and target_info["full_name"].startswith(project_path + "\\"))
+                    relationships.append({"source": identity, "target": target_info, "kind": "reference",
+                                          "attribute": ref_name, "index": index,
+                                          "expansion": "supported" if expandable else "unassigned" if target is None else "metadata_only"})
+                    if expandable and add(target):
+                        pending.append(target)
+            except RequestError:
+                raise
+            except Exception as exc:
+                failure(obj, ref_name, exc)
+        if cls == "StaCubic" or cls == "ElmRelay" or cls.startswith("Rel"):
+            try:
+                for child in obj.GetContents("*", 0) or []:
+                    child_info = describe(child)
+                    if child_info is None or not supported(child_info["class"]):
+                        continue
+                    suffix = child_info["full_name"][len(identity["full_name"]) + 1:]
+                    if not child_info["full_name"].startswith(identity["full_name"] + "\\") or "\\" in suffix:
+                        raise ValueError("GetContents returned an object outside direct containment.")
+                    relationships.append({"source": identity, "target": child_info, "kind": "contains",
+                                          "source_api": "GetContents(*, 0)"})
+                    if add(child):
+                        pending.append(child)
+            except RequestError:
+                raise
+            except Exception as exc:
+                failure(obj, "GetContents", exc)
+
+    if active_context(app) != context:
+        raise RequestError("SESSION_CHANGED", "The active configuration changed during the protection read; query again.", 409)
+    nodes.sort(key=lambda item: item["object"]["full_name"])
+    offset, limit = arguments["offset"], arguments["limit"]
+    page = nodes[offset:offset + limit]
+    page_paths = {item["object"]["full_name"] for item in page}
+    failed = any(record["status"] != "ok" or record.get("metadata_errors")
+                 for node in nodes for record in node["attributes"].values())
+    failed_types = any(node["equipment_type"] and (not node["equipment_type"]["all_attributes_read"]
+                       or node["equipment_type"]["metadata_error_count"]) for node in nodes)
+    response = {**info, "context": context, "root": describe(root), "nodes": page,
+                "relationships": [item for item in relationships if item["source"]["full_name"] in page_paths],
+                "matched_count": len(nodes), "returned_count": len(page), "offset": offset, "limit": limit,
+                "next_offset": offset + len(page) if offset + len(page) < len(nodes) else None,
+                "relationship_count": len(relationships), "errors": errors,
+                "read_complete": not errors and not failed and not failed_types,
+                "scope": "Protection containment plus ElmRelay/RelMultiset.pelm and RelLogdip/RelLogic.pSwitch references; one assigned-type hop.",
+                "note": "Follow next_offset for all nodes and their outgoing relationships. Contains does not mean measurement or trip wiring. Reference array indices are native zero-based slots; null is unassigned. Other reference targets remain metadata_only. Excluded attributes are unavailable on this object. No signal-logic evaluation, inferred breaker association, calculation, settings change or save is performed."}
+    if len(json.dumps(response, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 786432:
+        raise RequestError("PROTECTION_RESPONSE_TOO_LARGE", "Protection data exceeds the response budget; request a smaller page or narrower relay.", 409)
+    return response
+
+
 def execute_read(app, tool, arguments):
     info = session_info(app)  # Each request reads the live session.
+    if tool == "get_graphic_selection":
+        return get_graphic_selection(app, info, arguments)
     if tool == "get_feeder_inventory":
         return get_feeder_inventory(app, info, arguments)
     if tool == "get_element_connections":
         return get_element_connections(app, info, arguments)
+    if tool == "get_short_circuit_contributions":
+        return get_short_circuit_contributions(app, info, arguments)
+    if tool == "get_protection_chain":
+        return get_protection_chain(app, info, arguments)
     if tool == "list_expansion_stages":
         return list_expansion_stages(app, info, arguments)
     if tool == "get_power_balance":
