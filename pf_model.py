@@ -95,7 +95,14 @@ CALCULATION_SETTINGS = {
 REQUEST_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_-]{7,79}"
 SNAPSHOT_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}"
 VOLTAGE_QUANTITIES = {"positive_sequence": "m:u1", "phase_a": "m:u:A", "phase_b": "m:u:B", "phase_c": "m:u:C", "scalar": "m:u"}
-IMPLEMENTATION_VERSION = "0.18.0"
+SHORT_CIRCUIT_FAULT_TYPES = ("3psc", "2psc", "spgf", "2pgf")
+SHORT_CIRCUIT_FAULT_SETTINGS = ("iopt_mde", "iopt_shc", "iopt_allbus", "shcobj", "Rf", "Xf", "iopt_cur",
+                                "iopt_cnf", "iEnhancedZf", "i_p2psc", "i_pspgf", "i_p2pgf", "Tk", "Ta")
+OPERATING_SETPOINTS = {"ElmLod": ("plini", "qlini"), "ElmSym": ("pgini", "qgini"), "ElmGenstat": ("pgini", "qgini")}
+SETPOINT_UNITS = {"plini": ("W", "kW", "MW"), "pgini": ("W", "kW", "MW"),
+                  "qlini": ("var", "kvar", "Mvar"), "qgini": ("var", "kvar", "Mvar")}
+SETPOINT_CONTROLS = ("mode_inp", "av_mode", "ip_ctrl", "c_pstac", "c_psecc", "c_pmod", "scale0", "i_scale", "ngnum")
+IMPLEMENTATION_VERSION = "0.20.0"
 SUPPORTED_TOOLS = (
     "get_active_session", "get_active_scenario", "list_operation_scenarios", "browse_powerfactory_tree", "activate_study_case",
     "list_network_variations", "activate_network_variation", "deactivate_network_variation",
@@ -108,6 +115,8 @@ SUPPORTED_TOOLS = (
     "list_expansion_stages",
     "get_element_connections",
     "get_short_circuit_contributions",
+    "run_short_circuit_at_bus",
+    "set_operating_setpoints",
     "get_protection_chain",
     "get_graphic_selection", "mark_in_graphics",
     "get_feeder_inventory", "export_graphic",
@@ -281,6 +290,43 @@ def validate_arguments(tool, arguments):
         raise RequestError("INVALID_ARGUMENTS", "tool must be a string.")
     if not isinstance(arguments, dict):
         raise RequestError("INVALID_ARGUMENTS", "arguments must be a JSON object.")
+    if tool == "set_operating_setpoints":
+        required = {"full_name", "setpoints", "expected_study_case_full_name", "expected_agent_instance_id",
+                    "expected_active_scenario_full_name", "expected_recording_stage_full_name"}
+        if not required <= set(arguments) or set(arguments) - required - {"confirmation_digest"}:
+            raise RequestError("INVALID_ARGUMENTS", "Provide the exact element, expected context and one or two P/Q setpoints; omit confirmation_digest for a preview.")
+        path = validate_path(arguments["full_name"])
+        if path["element_class"] not in OPERATING_SETPOINTS:
+            raise RequestError("INVALID_ARGUMENTS", "Setpoints support only ElmLod, ElmSym and ElmGenstat.")
+        case = validate_full_path(arguments["expected_study_case_full_name"], "IntCase")
+        for key, cls in (("expected_active_scenario_full_name", "IntScenario"), ("expected_recording_stage_full_name", "IntSstage")):
+            if arguments[key] is not None:
+                validate_full_path(arguments[key], cls)
+        for value in (path["full_name"], case, arguments["expected_active_scenario_full_name"], arguments["expected_recording_stage_full_name"]):
+            if value is not None and any(part in ("", ".", "..") for part in value.split("\\")[1:]):
+                raise RequestError("INVALID_ARGUMENTS", "Use exact returned paths without relative or empty segments.")
+        instance = arguments["expected_agent_instance_id"]
+        if not isinstance(instance, str) or re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", instance) is None:
+            raise RequestError("INVALID_ARGUMENTS", "Copy expected_agent_instance_id from the active session.")
+        changes = arguments["setpoints"]
+        if not isinstance(changes, list) or not 1 <= len(changes) <= 2:
+            raise RequestError("INVALID_ARGUMENTS", "Provide one or two setpoints for one exact element.")
+        seen = set()
+        for change in changes:
+            if not isinstance(change, dict) or set(change) != {"attribute", "value", "expected_value", "unit"}:
+                raise RequestError("INVALID_ARGUMENTS", "Each setpoint requires only attribute, value, expected_value and unit.")
+            name = change["attribute"]
+            if not isinstance(name, str) or name not in OPERATING_SETPOINTS[path["element_class"]] or name in seen:
+                raise RequestError("INVALID_ARGUMENTS", "Use unique class-appropriate P/Q attributes only.")
+            seen.add(name)
+            if change["unit"] not in SETPOINT_UNITS[name]:
+                raise RequestError("INVALID_ARGUMENTS", "Use an explicit active/reactive power unit appropriate to the attribute.")
+            if any(type(change[key]) not in (int, float) or abs(change[key]) > sys.float_info.max or not math.isfinite(change[key]) for key in ("value", "expected_value")):
+                raise RequestError("INVALID_ARGUMENTS", "Setpoint values must be finite numbers, excluding booleans and numeric strings.")
+        digest = arguments.get("confirmation_digest")
+        if digest is not None and (not isinstance(digest, str) or re.fullmatch(r"[a-f0-9]{64}", digest) is None):
+            raise RequestError("INVALID_ARGUMENTS", "Copy the reviewed preview's exact confirmation_digest.")
+        return {**arguments, "setpoints": sorted(changes, key=lambda item: item["attribute"]), "confirmation_digest": digest}
     result_options = {}
     if tool in ("get_element_attributes", "get_elements_attributes", "list_element_attributes"):
         include_results = arguments.get("include_results", False)
@@ -569,6 +615,22 @@ def validate_arguments(tool, arguments):
         if set(arguments) != {"request_id"}:
             raise RequestError("INVALID_ARGUMENTS", "Provide only request_id.")
         return {"request_id": validate_request_id(arguments["request_id"])}
+    if tool == "run_short_circuit_at_bus":
+        extra = {"bus_full_name", "fault_type", "confirmation_digest"}
+        base = validate_arguments("run_short_circuit", {key: value for key, value in arguments.items() if key not in extra})
+        bus = validate_full_path(arguments.get("bus_full_name"), "ElmTerm")
+        if arguments.get("result_full_names") is None:
+            base["result_full_names"] = [bus]
+        fault_type = arguments.get("fault_type")
+        if not isinstance(fault_type, str) or fault_type not in SHORT_CIRCUIT_FAULT_TYPES:
+            raise RequestError("INVALID_ARGUMENTS", "fault_type must be 3psc, 2psc, spgf or 2pgf.")
+        digest = arguments.get("confirmation_digest")
+        if digest is not None and (not isinstance(digest, str) or re.fullmatch(r"[a-f0-9]{64}", digest) is None):
+            raise RequestError("INVALID_ARGUMENTS", "Copy the preview's exact confirmation_digest for an authorized execution.")
+        for path in (bus, base["command_full_name"], base["expected_study_case_full_name"], *base["result_full_names"]):
+            if any(part in ("", ".", "..") for part in path.split("\\")[1:]):
+                raise RequestError("INVALID_ARGUMENTS", "Use exact returned paths without relative or empty segments.")
+        return {**base, "bus_full_name": bus, "fault_type": fault_type, "confirmation_digest": digest}
     if tool in CALCULATION_TOOLS:
         if set(arguments) - {"command_full_name", "expected_study_case_full_name", "expected_agent_instance_id", "request_id", "result_full_names", "result_attributes"}:
             raise RequestError("INVALID_ARGUMENTS", "Unsupported calculation-execution argument; configure options in the GUI.")
@@ -1556,6 +1618,7 @@ def calculation_outcome(response):
         quality = "complete"
     return {"execution": execution, "validity": "valid" if validity is True else "invalid" if validity is False else "unknown",
             "result_quality": quality, "requested_element_count": requested, "successful_attribute_count": successful,
+            **({"settings_restoration": response["restoration"]["status"]} if "restoration" in response else {}),
             "note": "Separate execution, validity and read coverage; this is not independent engineering validation."}
 
 
@@ -1654,6 +1717,124 @@ def run_calculation(app, instance_id, calculation_records, info, tool, arguments
     return response
 
 
+def run_short_circuit_at_bus(app, instance_id, calculation_records, info, arguments):
+    if arguments["expected_agent_instance_id"] != instance_id:
+        raise RequestError("INSTANCE_MISMATCH", "The agent changed; no fault settings were written or calculation executed.", 409)
+    if arguments["expected_study_case_full_name"] != info["study_case"]["full_name"]:
+        raise RequestError("SESSION_CHANGED", "The active study case changed; nothing was written or executed.", 409)
+    request_id = arguments["request_id"]
+    signature = json.dumps({"tool": "run_short_circuit_at_bus", "arguments": arguments}, sort_keys=True, ensure_ascii=False)
+    if request_id in calculation_records:
+        prior = calculation_records[request_id]
+        if prior["signature"] != signature:
+            raise RequestError("REQUEST_ID_CONFLICT", "This request_id already identifies different calculation arguments.", 409)
+        return {**prior["response"], "replayed": True}
+    matches = [(obj, identity) for obj, identity in calculation_objects(app, info, "ComShc")
+               if identity["full_name"] == arguments["command_full_name"]]
+    if len(matches) != 1:
+        raise RequestError("COMMAND_NOT_FOUND", "Select one exact existing ComShc in the active study case.", 404)
+    command, identity = matches[0]
+    bus = resolve_element(app, {"full_name": arguments["bus_full_name"], "element_class": "ElmTerm"})
+    if not str(bus.GetFullName()).startswith(info["project"]["full_name"] + "\\"):
+        raise RequestError("FAULT_BUS_OUT_OF_SCOPE", "Select a calculation-relevant bus inside the active project.", 409)
+    bus_state = attribute_data(bus, ["outserv", "systype", "nphase", "uknom"])["attributes"]
+    if any(bus_state[name].get("status") != "ok" or bus_state[name].get("value") != value
+           for name, value in (("outserv", 0), ("systype", 0), ("nphase", 3))):
+        raise RequestError("UNSUPPORTED_FAULT_BUS", "This workflow requires an in-service, three-phase AC ElmTerm with readable native state.", 409)
+    settings = attribute_data(command, SHORT_CIRCUIT_FAULT_SETTINGS)
+    fields = settings["attributes"]
+    if not settings["all_attributes_read"]:
+        raise RequestError("FAULT_SETTINGS_UNAVAILABLE", "The required PowerFactory 2024 fault settings could not all be read; nothing was written.", 409)
+    values = {name: entry["value"] for name, entry in fields.items()}
+    if (type(values["iopt_mde"]) is not int or values["iopt_mde"] not in (1, 3)
+            or type(values["iopt_cnf"]) is not int or values["iopt_cnf"] != 0
+            or type(values["iEnhancedZf"]) is not int or values["iEnhancedZf"] != 0):
+        raise RequestError("UNSUPPORTED_FAULT_MODE", "Use an existing IEC 60909 or Complete command with multiple faults and enhanced fault impedance disabled. This tool preserves method and impedance settings.", 409)
+    context = active_context(app, info)
+    if not context["context_complete"]:
+        raise RequestError("CONTEXT_INCOMPLETE", "Resolve active-session context errors before configuring a fault.", 409)
+    requested = {"iopt_allbus": 0, "shcobj": json_attribute_value(bus), "iopt_shc": arguments["fault_type"]}
+    changes = [{"attribute": name, "before": fields[name], "after": value} for name, value in requested.items()]
+    preview = {"agent_instance_id": instance_id, "context": context, "command": identity,
+               "bus": describe(bus), "bus_state": bus_state, "changes": changes,
+               "settings_before": fields, "settings_coverage_complete": False,
+               "result_full_names": arguments["result_full_names"],
+               "result_attributes": arguments["result_attributes"], "request_id": request_id,
+               "scope": "Temporarily set only iopt_allbus, shcobj and iopt_shc; execute once; read results before restoring those settings. Other command options remain configured.",
+               "restoration_note": "Restoring command settings does not restore prior calculation results or automatic-control state. Stored samples describe this execution; later native validity can change."}
+    digest = hashlib.sha256(json.dumps(preview, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+    if active_context(app, info) != context:
+        raise RequestError("SESSION_CHANGED", "The active context changed during preparation; nothing was written or executed.", 409)
+    if arguments["confirmation_digest"] is None:
+        return {**info, "status": "preview", "preview": preview, "confirmation_digest": digest,
+                "write_attempted": False, "execution_attempted": False, "success": None}
+    if arguments["confirmation_digest"] != digest:
+        raise RequestError("FAULT_PREVIEW_CHANGED", "The reviewed target, settings or context changed. Request a new preview; nothing was written or executed.", 409)
+    if len(calculation_records) >= 32:
+        raise RequestError("CALCULATION_HISTORY_FULL", "This agent has recorded 32 calculation attempts; no fault settings were written.", 409)
+    # Resolve sample paths and preserve native references before the first setter.
+    for path in arguments["result_full_names"]:
+        resolve_element(app, validate_path(path))
+    original = {name: command.GetAttribute(name) for name in requested}
+    if any(json_attribute_value(original[name]) != values[name] for name in original):
+        raise RequestError("FAULT_PREVIEW_CHANGED", "Fault settings changed before assignment; nothing was written or executed.", 409)
+    response = {**info, "request_id": request_id, "calculation": "short_circuit", "command": identity,
+                "context_before": context, "status": "configuring", "success": False, "replayed": False,
+                "started_at_utc": datetime.now(timezone.utc).isoformat(), "return_code": None,
+                "write_attempted": False, "execution_attempted": False, "results": [], "results_read": False,
+                "result_requested_count": len(arguments["result_full_names"]),
+                "fault_configuration": {"preview": preview, "confirmation_digest": digest, "verified": False}}
+    calculation_records[request_id] = {"signature": signature, "response": response}
+    attempted = []
+    try:
+        for name, value in requested.items():
+            if values[name] != value:
+                attempted.append(name)  # A setter can write and then raise.
+                response["write_attempted"] = True
+                command.SetAttribute(name, bus if name == "shcobj" else value)
+        configured = attribute_data(command, SHORT_CIRCUIT_FAULT_SETTINGS)
+        expected = {**values, **requested}
+        if (not configured["all_attributes_read"]
+                or any(configured["attributes"][name]["value"] != value for name, value in expected.items())
+                or active_context(app, info) != context):
+            raise ValueError("Fault settings or context did not match the confirmed configuration; Execute was not called.")
+        response["fault_configuration"].update(verified=True, settings_at_execution=configured["attributes"])
+        response["status"] = "running"
+        base = {key: value for key, value in arguments.items() if key not in ("bus_full_name", "fault_type", "confirmation_digest")}
+        execution_records = {}
+        try:
+            run_calculation(app, instance_id, execution_records, info, "run_short_circuit", base)
+        finally:
+            response["execution_attempted"] = request_id in execution_records
+            if request_id in execution_records:
+                response.update(execution_records[request_id]["response"])
+    except Exception as exc:
+        response.update(status="indeterminate" if response["execution_attempted"] else "not_executed", success=False,
+                        error={"code": "FAULT_WORKFLOW_FAILED", "message": (type(exc).__name__ + ": " + str(exc))[:320]})
+    finally:
+        execution_success = response["success"]
+        restoration_errors = []
+        for name in reversed(attempted):
+            try:
+                command.SetAttribute(name, original[name])
+            except Exception as exc:
+                restoration_errors.append({"attribute": name, "error": (type(exc).__name__ + ": " + str(exc))[:320]})
+        restored = attribute_data(command, SHORT_CIRCUIT_FAULT_SETTINGS)
+        settings_restored = (restored["all_attributes_read"]
+                             and all(restored["attributes"][name]["value"] == value for name, value in values.items()))
+        response["restoration"] = {"status": "restored" if settings_restored else "failed", "success": settings_restored,
+                                   "settings_after": restored["attributes"], "errors": restoration_errors,
+                                   "prior_results_restored": False}
+        response["execution_success"] = execution_success
+        response["success"] = execution_success and settings_restored
+        response["effects"] = preview["scope"] + " " + preview["restoration_note"]
+        response["result_scope_note"] = "Fault target/type are recorded in fault_configuration. Result paths select sample reads only."
+        response["validity_after_restoration"] = calculation_validity(app, "short_circuit")
+        response["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        response["outcome"] = calculation_outcome(response)
+    return response
+
+
 def list_model_elements(app, info, arguments):
     network = arguments["network_full_name"]
     if network is not None:
@@ -1714,6 +1895,141 @@ def list_model_elements(app, info, arguments):
                       filter_error_count=error_count, filter_errors=errors,
                       filter_errors_truncated=error_count > len(errors), filtering_complete=error_count == 0)
     return result
+
+
+def setpoint_recording_destination(app, info, obj, context, names):
+    relevant = {name: app.IsScenarioAttribute(str(obj.GetClassName()), name) for name in names}
+    if any(type(value) is not int or value != 1 for value in relevant.values()):
+        raise RequestError("SETPOINT_NOT_OPERATIONAL", "The native scenario configuration does not classify every selected attribute as operational.", 409)
+    grid = obj
+    for _ in range(64):
+        if grid is None or str(grid.GetClassName()) == "ElmNet":
+            break
+        grid = grid.GetParent()
+    if grid is None or str(grid.GetClassName()) != "ElmNet" or not str(grid.GetFullName()).startswith(info["project"]["full_name"] + "\\"):
+        raise RequestError("SETPOINT_GRID_UNAVAILABLE", "The element's exact grid in the active project could not be established.", 409)
+    destination = {"grid": describe(grid), "scenario_attributes": relevant,
+                   "persistence_note": "No explicit Save is called. Native auto-save settings can persist edits; restoring values later does not undo save history."}
+    scenario = app.GetActiveScenario()
+    if describe(scenario) != context["scenario"]:
+        raise RequestError("SESSION_CHANGED", "The active scenario changed during recording-destination inspection.", 409)
+    if scenario is not None:
+        subsets = [subset for subset in scenario.GetContents("*.IntSubset", 1) or [] if subset is not None
+                   and str(subset.GetFullName()).startswith(str(scenario.GetFullName()) + "\\")
+                   and describe(subset.GetAttribute("pGrid")) == describe(grid)]
+        excluded = subsets[0].GetAttribute("iExcluded") if len(subsets) == 1 else None
+        if type(excluded) is not int or excluded != 0:
+            raise RequestError("SCENARIO_RECORDING_UNVERIFIED", "Require one non-excluded grid subset in the active scenario. Excluded, missing, ambiguous and type-based subsets are unsupported.", 409)
+        return {**destination, "kind": "active_scenario", "object": describe(scenario), "subset": describe(subsets[0])}
+    if context["recording_stage"] is not None:
+        return {**destination, "kind": "recording_stage", "object": context["recording_stage"]}
+    if context["active_variations"]:
+        raise RequestError("SETPOINT_RECORDING_UNVERIFIED", "Active variations have no verified recording stage; nothing was written.", 409)
+    return {**destination, "kind": "base_grid", "object": describe(grid)}
+
+
+def setpoint_readback_matches(entry, value, unit):
+    return (entry.get("status") == "ok" and type(entry.get("value")) in (int, float)
+            and math.isclose(entry["value"], value, rel_tol=1e-12, abs_tol=1e-12)
+            and (entry.get("unit") or "").strip() == unit.strip())
+
+
+def set_operating_setpoints(app, instance_id, info, arguments):
+    if arguments["expected_agent_instance_id"] != instance_id:
+        raise RequestError("INSTANCE_MISMATCH", "The agent changed; no setpoint was written.", 409)
+    if arguments["expected_study_case_full_name"] != info["study_case"]["full_name"]:
+        raise RequestError("SESSION_CHANGED", "The active study case changed; no setpoint was written.", 409)
+    context = active_context(app, info)
+    if not context["context_complete"]:
+        raise RequestError("CONTEXT_INCOMPLETE", "Resolve active-session context errors before setpoint changes.", 409)
+    for key, expected in (("scenario", "expected_active_scenario_full_name"), ("recording_stage", "expected_recording_stage_full_name")):
+        actual = (context[key] or {}).get("full_name")
+        if actual != arguments[expected] or actual is not None and not actual.startswith(info["project"]["full_name"] + "\\"):
+            raise RequestError("SETPOINT_CONTEXT_CHANGED", "The expected scenario or recording stage differs from the active context.", 409)
+    path = validate_path(arguments["full_name"])
+    obj = resolve_element(app, path)
+    if not path["full_name"].startswith(info["project"]["full_name"] + "\\"):
+        raise RequestError("SETPOINT_OUT_OF_SCOPE", "Select an exact calculation-relevant element in the active project.", 409)
+    names = OPERATING_SETPOINTS[path["element_class"]]
+    before = attribute_data(obj, names)["attributes"]
+    if any(entry.get("status") != "ok" or type(entry.get("value")) not in (int, float) for entry in before.values()):
+        raise RequestError("SETPOINT_UNAVAILABLE", "Both native P/Q inputs must be readable scalar numbers before a write.", 409)
+    changes = arguments["setpoints"]
+    for change in changes:
+        current = before[change["attribute"]]
+        if current.get("status") != "ok" or type(current.get("value")) not in (int, float):
+            raise RequestError("SETPOINT_UNAVAILABLE", "Each selected native setpoint must be a readable scalar number.", 409)
+        if current.get("unit") is None or current["unit"].strip() != change["unit"]:
+            raise RequestError("SETPOINT_UNIT_MISMATCH", "Use exactly the physical unit reported for this attribute. No unit conversion is performed.", 409)
+        if current["value"] != change["expected_value"]:
+            raise RequestError("SETPOINT_CHANGED", "A native setpoint differs from its expected value; no setpoint was written.", 409)
+    controls = control_attribute_data(obj, SETPOINT_CONTROLS)
+    input_mode = controls["attributes"].get("mode_inp", {})
+    if input_mode.get("status") != "ok" or input_mode.get("value") not in ("PQ", "DEF"):
+        raise RequestError("UNSUPPORTED_SETPOINT_MODE", "This workflow requires native PQ or DEF input mode; input/controller modes are not changed.", 409)
+    mode = input_mode["value"]
+    characteristics = [describe(ref) for ref in obj.GetContents("*.ChaRef", 0) or []
+                       if ref is not None and str(ref.loc_name) in {change["attribute"] for change in changes}]
+    if characteristics:
+        raise RequestError("SETPOINT_CHARACTERISTIC_ASSIGNED", "A selected input has a parameter characteristic; characteristic-driven inputs are unsupported.", 409)
+    destination = setpoint_recording_destination(app, info, obj, context, [change["attribute"] for change in changes])
+    preview = {"agent_instance_id": instance_id, "context": context, "element": describe(obj),
+               "setpoints": changes, "parameters_before": before, "recording_destination": destination,
+               "controls": {key: value for key, value in controls.items() if key != "attribute_read_ms"},
+               "input_mode_verification": {"mode": mode,
+                   "note": "DEF retains PowerFactory's native default input selection; it is not assumed to mean PQ. Verification covers stored P/Q inputs, not controller-achieved power."},
+               "readback_tolerance": {"relative": 1e-12, "absolute_in_reported_unit": 1e-12},
+               "scope": "Write only the selected stored P/Q inputs. Controllers, scaling and subsequent calculations can alter achieved P/Q. No calculation, activation, explicit save or automatic rollback is requested. Multiple writes are not atomic."}
+    digest = hashlib.sha256(json.dumps(preview, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+    if active_context(app, info) != context:
+        raise RequestError("SESSION_CHANGED", "The active context changed during the preview; no setpoint was written.", 409)
+    if arguments["confirmation_digest"] is None:
+        return {**info, "status": "preview", "preview": preview, "confirmation_digest": digest,
+                "write_attempted": False, "success": None}
+    if arguments["confirmation_digest"] != digest:
+        raise RequestError("SETPOINT_PREVIEW_CHANGED", "The reviewed values, units, controller metadata or context changed; request a new preview. Nothing was written.", 409)
+    attempted, errors = [], []
+    validity_before = {kind: calculation_validity(app, kind) for kind in ("power_flow", "short_circuit")}
+    try:
+        for change in changes:
+            name = change["attribute"]
+            current = read_attribute(obj, name)
+            if (active_context(app, info) != context or obj.GetAttribute("mode_inp") != mode or current.get("status") != "ok"
+                    or current.get("value") != change["expected_value"] or (current.get("unit") or "").strip() != change["unit"]):
+                raise ValueError("Context, input mode, native value or unit changed before assignment; remaining setters were skipped.")
+            if change["value"] != change["expected_value"]:
+                attempted.append(name)  # A setter can write and then raise.
+                obj.SetAttribute(name, change["value"])
+                observed = read_attribute(obj, name)
+                if not setpoint_readback_matches(observed, change["value"], change["unit"]):
+                    raise ValueError("Native setpoint readback did not match; remaining setters were skipped.")
+    except Exception as exc:
+        errors.append({"code": "SETPOINT_WRITE_FAILED", "message": (type(exc).__name__ + ": " + str(exc))[:320]})
+    after = attribute_data(obj, names)["attributes"]
+    mode_after = read_attribute(obj, "mode_inp")
+    mode_unchanged = mode_after.get("status") == "ok" and mode_after.get("value") == mode
+    try:
+        context_after = active_context(app)
+    except Exception as exc:
+        context_after = None
+        errors.append({"code": "SETPOINT_CONTEXT_UNAVAILABLE", "message": (type(exc).__name__ + ": " + str(exc))[:320]})
+    targets = {change["attribute"]: change["value"] for change in changes}
+    verified = all(setpoint_readback_matches(after[name], targets.get(name, before[name]["value"]), before[name].get("unit") or "") for name in names)
+    if not verified:
+        errors.append({"code": "SETPOINT_READBACK_MISMATCH", "message": "Final native P/Q values or units differ from the requested/unchanged values; inspect parameters_after."})
+    if context_after is not None and context_after != context:
+        errors.append({"code": "SETPOINT_CONTEXT_CHANGED", "message": "The active context differs after the operation; inspect context_after."})
+    if not mode_unchanged:
+        errors.append({"code": "SETPOINT_MODE_CHANGED", "message": "The native input mode changed or could not be read after the operation; no mode restoration was attempted."})
+    success = not errors and verified and mode_unchanged and context_after == context
+    return {**info, "element": describe(obj), "status": "succeeded" if success else "partial_or_unverified",
+            "success": success, "write_attempted": bool(attempted), "attempted_attributes": attempted,
+            "preview": preview, "confirmation_digest": digest, "parameters_after": after,
+            "readback_verified": verified, "input_mode_after": mode_after, "input_mode_unchanged": mode_unchanged,
+            "context_after": context_after, "errors": errors,
+            "validity_before": validity_before,
+            "validity_after": {kind: calculation_validity(app, kind) for kind in validity_before},
+            "rollback_attempted": False, "note": "Inspect all native readbacks after any failure. Changes already made remain applied. Restore through a new explicit request using current expected values; native auto-save may have persisted changes."}
 
 
 def set_study_time(app, instance_id, info, arguments):

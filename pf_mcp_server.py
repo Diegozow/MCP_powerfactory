@@ -14,7 +14,7 @@ import anyio
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from pf_bridge import BridgeError, PFBridge
 from pf_connection import default_connection_path
@@ -31,6 +31,14 @@ AttributeList = Annotated[list[AttributeName], Field(min_length=1, max_length=10
 CalculationRequestId = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{7,79}$")]
 ResultPaths = Annotated[list[FullName], Field(max_length=8)]
 SnapshotId = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")]
+
+
+class OperatingSetpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attribute: Literal["plini", "qlini", "pgini", "qgini"]
+    value: Annotated[float, Field(strict=True, allow_inf_nan=False)]
+    expected_value: Annotated[float, Field(strict=True, allow_inf_nan=False)]
+    unit: Literal["W", "kW", "MW", "var", "kvar", "Mvar"]
 
 
 def write_result_export(data, file_name):
@@ -121,6 +129,7 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
             "Use get_powerfactory_capabilities to compare the running agent's tool/source manifest with this server; licensing can remain unknown. "
             "Use activate_operation_scenario only with an explicit target and permission to discard prior unsaved scenario changes when switching. "
             "Use save_operation_scenario/create_operation_scenario without confirmation_digest for a read-only preview; show its destination and native stored/current samples before an authorized confirmed write. Saving persists all native operational data, not only sampled values. Creation keeps the source active and never overwrites an existing destination. "
+            "Use set_operating_setpoints for explicitly requested stored P/Q input changes on one ElmLod, ElmSym or ElmGenstat. Preview first, review native units, expected values and recording destination, then confirm an authorized write. Readback is not achieved power; calculations, saves and restoration are separate requests. "
             "get_bus_voltage reads native m:u1 by default, with phase/scalar choices and original reported units. "
             "get_transformer_loading covers ElmTr2/ElmTr3 existing native c:loading values without thresholds. No calculation runs. "
             "export_results writes selected results to a new CSV/JSON in this workspace's exports folder; inspect export_complete. "
@@ -163,6 +172,7 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
             "A calculation_request_id snapshot uses only results already stored in that attempt, never current values labeled as historical. "
             "Run a calculation only when requested by the user. First list_calculation_commands and inspect its current raw settings. "
             "run_power_flow and run_short_circuit execute only an existing ComLdf/ComShc with its GUI settings; no option overrides or object creation. "
+            "Use run_short_circuit_at_bus for an explicitly requested fault at one exact bus. Omit confirmation_digest for a read-only preview, then use the reviewed digest for authorized execution and settings restoration. Inspect execution and restoration separately; restoring settings does not restore prior results. "
             "Copy the exact command and study-case paths and expected_agent_instance_id from the session envelope; provide a unique request_id known before execution. "
             "The same ID and arguments replay the stored record within this agent session instead of executing twice. "
             "A timeout does not cancel Execute: query get_calculation_status, do not automatically rerun or restart the agent. "
@@ -182,7 +192,7 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
 
     def call(tool, arguments):
         try:
-            long_call = tool in ("run_power_flow", "run_short_circuit", "get_calculation_status", "get_line_loading", "capture_result_snapshot", "browse_powerfactory_tree", "activate_study_case", "list_operation_scenarios", "list_network_variations", "list_expansion_stages", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "get_bus_voltage", "get_transformer_loading", "export_results", "set_study_time", "get_power_balance", "get_bus_voltage_sequences", "get_transformer_control_status", "get_element_connections", "get_short_circuit_contributions", "get_protection_chain", "get_graphic_selection", "mark_in_graphics", "get_feeder_inventory", "export_graphic", "save_operation_scenario", "create_operation_scenario")
+            long_call = tool in ("run_power_flow", "run_short_circuit", "run_short_circuit_at_bus", "set_operating_setpoints", "get_calculation_status", "get_line_loading", "capture_result_snapshot", "browse_powerfactory_tree", "activate_study_case", "list_operation_scenarios", "list_network_variations", "list_expansion_stages", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "get_bus_voltage", "get_transformer_loading", "export_results", "set_study_time", "get_power_balance", "get_bus_voltage_sequences", "get_transformer_control_status", "get_element_connections", "get_short_circuit_contributions", "get_protection_chain", "get_graphic_selection", "mark_in_graphics", "get_feeder_inventory", "export_graphic", "save_operation_scenario", "create_operation_scenario")
             return bridge.call(tool, arguments, timeout=calculation_timeout if long_call else None)
         except BridgeError as exc:
             raise ToolError(str(exc)) from exc
@@ -315,6 +325,59 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
             "expected_study_case_full_name": expected_study_case_full_name,
             "expected_agent_instance_id": expected_agent_instance_id, "confirmation_digest": confirmation_digest,
         })
+
+    @server.tool(title="Preview or change selected operational P/Q inputs", annotations=calculation_annotations)
+    def set_operating_setpoints(
+        full_name: FullName,
+        setpoints: Annotated[list[OperatingSetpoint], Field(min_length=1, max_length=2)],
+        expected_study_case_full_name: FullName,
+        expected_agent_instance_id: Annotated[str, Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")],
+        expected_active_scenario_full_name: FullName | None,
+        expected_recording_stage_full_name: FullName | None,
+        confirmation_digest: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")] | None = None,
+    ) -> dict[str, Any]:
+        """Omit confirmation_digest for a read-only preview of stored P/Q changes.
+
+        Select one exact calculation-relevant ElmLod (plini/qlini), ElmSym or
+        ElmGenstat including BESS (pgini/qgini). Each of one or two setpoints
+        requires attribute, value, expected_value and unit. Use the exact current
+        native units from get_element_attributes: W/kW/MW or var/kvar/Mvar.
+        No unit, sign, parallel-unit or scaling conversion is performed.
+        Copy case/agent/scenario/recording-stage identities from the session;
+        explicitly pass null when no scenario or recording stage is active.
+
+        Requires native PQ or DEF input mode, readable P/Q inputs, no characteristic
+        on a selected input, and native scenario relevance. Preview identifies
+        recording into the base grid, current stage or active scenario. Scenario
+        writes require one non-excluded grid subset; type-based, missing and
+        ambiguous subsets are unsupported. Inspect available controller and
+        scaling metadata: writing an input does not establish achieved power.
+        DEF preserves the native default selection and is not assumed to mean PQ.
+        The native input mode is checked before setters and after the operation;
+        this tool never assigns input or controller modes. Check input_mode_after
+        and input_mode_unchanged along with stored P/Q readbacks.
+
+        Show the preview and use its digest only for an authorized write. All
+        expected values, units and context are checked before setters; each
+        assigned value is read back with 1e-12 relative/absolute tolerance in the
+        reported unit. Expected prior values require exact numeric equality.
+        Check success, parameters_after, errors and
+        context_after. Two-field writes are not atomic. On failure, already
+        written values remain; there is no automatic rollback. Restore through
+        a new explicit request with current expected values if requested.
+
+        No calculation, activation or explicit save is called. PowerFactory's
+        native auto-save can persist changes. After a timeout, inspect context
+        and exact native P/Q values before further work. Do not automatically
+        retry, restore, calculate, save or restart.
+        """
+        return call("set_operating_setpoints", {"full_name": full_name,
+            "setpoints": [item.model_dump() for item in setpoints],
+            "expected_study_case_full_name": expected_study_case_full_name,
+            "expected_agent_instance_id": expected_agent_instance_id,
+            "expected_active_scenario_full_name": expected_active_scenario_full_name,
+            "expected_recording_stage_full_name": expected_recording_stage_full_name,
+            "confirmation_digest": confirmation_digest})
 
     @server.tool(title="Set the active study case's study time", annotations=calculation_annotations)
     def set_study_time(
@@ -1230,6 +1293,52 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
             "expected_study_case_full_name": expected_study_case_full_name, "request_id": request_id,
             "expected_agent_instance_id": expected_agent_instance_id,
             "result_full_names": result_full_names, "result_attributes": result_attributes})
+
+    @server.tool(title="Preview or run a short circuit at an explicit bus", annotations=calculation_annotations)
+    def run_short_circuit_at_bus(
+        command_full_name: FullName,
+        bus_full_name: FullName,
+        fault_type: Literal["3psc", "2psc", "spgf", "2pgf"],
+        expected_study_case_full_name: FullName,
+        expected_agent_instance_id: Annotated[str, Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")],
+        request_id: CalculationRequestId,
+        confirmation_digest: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")] | None = None,
+        result_full_names: ResultPaths | None = None,
+        result_attributes: AttributeList | None = None,
+    ) -> dict[str, Any]:
+        """Omit confirmation_digest for a read-only preview of one bus fault.
+
+        Copy an existing ComShc path from list_calculation_commands, an exact
+        ElmTerm path from list_model_elements and case/agent IDs from the session.
+        Supports in-service three-phase AC buses, IEC 60909 or Complete methods, single faults and
+        basic impedance mode using PowerFactory 2024 fields. Fault types are
+        3psc (three phase), 2psc (two phase), spgf (single phase to ground) and
+        2pgf (two phase to ground). Method, impedance, phase selections and other
+        options remain configured and appear in the preview.
+
+        Show the preview before an authorized run. Reuse its request_id and
+        confirmation_digest; changes to context or reviewed settings reject it.
+        Only iopt_allbus, shcobj and iopt_shc are temporarily assigned and read
+        back. Reuses run_short_circuit execution/result handling, then attempts
+        restoration even on failure. No object creation or save is requested.
+        result_full_names defaults to the fault bus; an empty list skips samples.
+        Samples are read BEFORE restoration. execution_success, outcome and
+        restoration report independent facts; success requires both execution
+        and settings restoration. Restoring settings does not restore previous
+        results or automatic controls. validity_after_restoration is separate
+        from the execution's historical validity_after.
+
+        Identical confirmed repeats replay the stored attempt without setters
+        or Execute. A timeout leaves execution AND restoration unknown. Query
+        get_calculation_status with this ID in the same agent session and inspect
+        command settings before further work; do not automatically retry/restart.
+        """
+        return call("run_short_circuit_at_bus", {"command_full_name": command_full_name,
+            "bus_full_name": bus_full_name, "fault_type": fault_type,
+            "expected_study_case_full_name": expected_study_case_full_name,
+            "expected_agent_instance_id": expected_agent_instance_id, "request_id": request_id,
+            "confirmation_digest": confirmation_digest, "result_full_names": result_full_names,
+            "result_attributes": result_attributes})
 
     @server.tool(title="Read a stored PowerFactory calculation attempt", annotations=annotations)
     def get_calculation_status(request_id: CalculationRequestId) -> dict[str, Any]:

@@ -29,7 +29,7 @@ from pf_model import (
     browse_powerfactory_tree, activate_study_case,
     list_network_variations, change_network_variation,
     activate_operation_scenario, set_study_time, powerfactory_capabilities, IMPLEMENTATION_VERSION,
-    export_graphic, write_operation_scenario, mark_in_graphics,
+    export_graphic, write_operation_scenario, mark_in_graphics, run_short_circuit_at_bus, set_operating_setpoints,
 )
 
 
@@ -50,6 +50,8 @@ def execute_tool(server, tool, arguments):
     if tool == "activate_study_case":
         return activate_study_case(server.app, server.instance_id, arguments)
     info = session_info(server.app)
+    if tool == "set_operating_setpoints":
+        return set_operating_setpoints(server.app, server.instance_id, info, arguments)
     if tool in ("save_operation_scenario", "create_operation_scenario"):
         return write_operation_scenario(server.app, server.instance_id, info, tool, arguments)
     if tool == "export_graphic":
@@ -97,6 +99,8 @@ def execute_tool(server, tool, arguments):
         return server.snapshots[snapshot_id]
     if tool == "list_calculation_commands":
         return list_calculation_commands(server.app, info, arguments)
+    if tool == "run_short_circuit_at_bus":
+        return run_short_circuit_at_bus(server.app, server.instance_id, server.calculation_records, info, arguments)
     if tool in CALCULATION_TOOLS:
         return run_calculation(server.app, server.instance_id, server.calculation_records, info, tool, arguments)
     if tool == "get_calculation_status":
@@ -315,7 +319,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 "powerfactory_process_id": os.getpid(), "tool": tool,
                 "data": data,
                 "execution": {
-                    "source": "live_powerfactory_session", "read_only": tool not in CALCULATION_TOOLS and tool not in ("capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic", "mark_in_graphics") and (tool not in ("save_operation_scenario", "create_operation_scenario") or arguments["confirmation_digest"] is None),
+                    "source": "live_powerfactory_session", "read_only": tool not in CALCULATION_TOOLS and tool not in ("capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic", "mark_in_graphics") and (tool not in ("save_operation_scenario", "create_operation_scenario", "run_short_circuit_at_bus", "set_operating_setpoints") or arguments["confirmation_digest"] is None),
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     "script_thread_id": self.server.owner_thread_id,
                     "api_call_thread_id": api_thread_id,
