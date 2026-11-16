@@ -2,21 +2,27 @@
 """Step 8: calculation-specific result candidates and availability-aware sample reads.
 
 Standard library only. All PowerFactory API calls stay on the launching
-script thread, and the GUI stays busy until this work session ends.
+script thread. Optional Qt event processing keeps the GUI active between requests.
 """
 
+import ctypes
 import hmac
 import importlib
 import json
 import os
 import secrets
 import socket
+import sys
 import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+# Reject nested launches before reloading modules used by the active agent.
+if getattr(sys.modules.get("powerfactory"), "_pf_mcp_agent_running", False):
+    raise RuntimeError("The MCP agent is already active. Stop it before launching another agent.")
 
 # ComPython can retain imported modules between script launches.
 importlib.reload(importlib.import_module("pf_connection"))
@@ -42,6 +48,83 @@ SOCKET_TIMEOUT_SECONDS = 3
 REQUEST_READ_TIMEOUT_SECONDS = 5
 VERSION = IMPLEMENTATION_VERSION
 PROTOCOL = "pf-mcp-bridge-v1"
+
+
+class GuiEventPump:
+    """Use only PowerFactory's already-loaded Qt5 ABI, on the script thread."""
+
+    def __init__(self, app, requested=False):
+        self.app = app
+        self.requested = requested
+        self.enabled = False
+        self.thread_id = threading.get_ident()
+        self.iterations = 0
+        self.echo_on_called = False
+        self.error = None
+        self.restore_error = None
+        self.previous_gui_updates = None
+        if not requested:
+            return
+        try:
+            if sys.platform != "win32" or ctypes.sizeof(ctypes.c_void_p) != 8:
+                raise RuntimeError("GUI event processing requires 64-bit Windows PowerFactory Qt5.")
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            get_module = kernel.GetModuleHandleW
+            get_module.argtypes = [ctypes.c_wchar_p]
+            get_module.restype = ctypes.c_void_p
+            path = str(Path(app.GetInstallationDirectory()) / "Qt5Core_pf.dll")
+            handle = get_module(path)
+            if not handle:
+                raise RuntimeError("PowerFactory's Qt5Core_pf.dll is not loaded in this process.")
+            self.qt = ctypes.CDLL(path, handle=handle)
+            self.process = getattr(self.qt, "?processEvents@QCoreApplication@pf@@SAXV?$QFlags@W4ProcessEventsFlag@QEventLoop@pf@@@2@H@Z")
+            self.process.argtypes = [ctypes.c_int, ctypes.c_int]
+            self.process.restype = None
+            self.send_posted = getattr(self.qt, "?sendPostedEvents@QCoreApplication@pf@@SAXPEAVQObject@2@H@Z")
+            self.send_posted.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            self.send_posted.restype = None
+            previous = app.SetGuiUpdateEnabled(1)
+            if type(previous) is not int or previous not in (0, 1):
+                raise RuntimeError("SetGuiUpdateEnabled did not return its previous 0/1 state.")
+            self.previous_gui_updates = previous
+            app.EchoOn()  # ComPython can leave input deactivated independently of GUI redraws.
+            self.echo_on_called = True
+            self.enabled = True
+        except Exception as exc:
+            self.error = (type(exc).__name__ + ": " + str(exc))[:320]
+
+    def process_events(self):
+        if not self.enabled:
+            return
+        if threading.get_ident() != self.thread_id:
+            raise RuntimeError("Process GUI events only on the original ComPython thread.")
+        try:
+            self.process(0, 5)  # AllEvents; callbacks/modal dialogs can exceed this time slice.
+            self.send_posted(None, 52)  # DeferredDelete is not drained by a local processEvents loop.
+            self.iterations += 1
+        except Exception as exc:
+            self.enabled = False
+            self.error = (type(exc).__name__ + ": " + str(exc))[:320]
+
+    def close(self):
+        if self.previous_gui_updates is not None and threading.get_ident() != self.thread_id:
+            raise RuntimeError("Restore GUI updates only on the original ComPython thread.")
+        self.enabled = False
+        if self.previous_gui_updates is not None:
+            try:
+                self.app.SetGuiUpdateEnabled(self.previous_gui_updates)
+            except Exception as exc:
+                self.restore_error = (type(exc).__name__ + ": " + str(exc))[:320]
+            self.previous_gui_updates = None
+
+    def status(self):
+        return {"requested": self.requested, "event_pump_enabled": self.enabled,
+                "backend": "PowerFactory loaded Qt5" if self.enabled else None,
+                "processed_iterations": self.iterations, "thread_id": self.thread_id,
+                "echo_on_called": self.echo_on_called,
+                "between_requests_only": True, "error": self.error, "restore_error": self.restore_error}
+
+
 def execute_tool(server, tool, arguments):
     if tool == "get_powerfactory_capabilities":
         return powerfactory_capabilities(server.app)
@@ -117,10 +200,11 @@ class AgentServer(HTTPServer):
     allow_reuse_address = False
 
     def __init__(self, app, port=PORT, run_seconds=RUN_SECONDS,
-                 first_timeout=FIRST_REQUEST_TIMEOUT_SECONDS, idle_timeout=IDLE_TIMEOUT_SECONDS):
+                 first_timeout=FIRST_REQUEST_TIMEOUT_SECONDS, idle_timeout=IDLE_TIMEOUT_SECONDS, gui_pump=None):
         if min(run_seconds, first_timeout, idle_timeout) <= 0:
             raise ValueError("All session time limits must be positive.")
         self.app = app
+        self.gui_pump = gui_pump
         self.owner_thread_id = threading.get_ident()
         self.instance_id = str(uuid.uuid4())
         self.token = secrets.token_urlsafe(32)
@@ -167,12 +251,18 @@ class AgentServer(HTTPServer):
                 "first_request_timeout_seconds": self.first_timeout, "idle_timeout_seconds": self.idle_timeout,
                 "calculation_record_count": len(self.calculation_records), "snapshot_count": len(self.snapshots),
                 "snapshot_ids": sorted(self.snapshots), "snapshot_limit": 16,
-                "note": "This call refreshes the idle window. Times are estimates at response creation. Operations are synchronous; status calls wait behind PowerFactory work. Snapshots and calculation records last only for this agent session."}
+                "gui": self.gui_pump.status() if self.gui_pump is not None else {"requested": False, "event_pump_enabled": False},
+                "note": "This call refreshes the idle window. Times are estimates at response creation. Operations are synchronous; status calls wait behind PowerFactory work. GUI event processing, when enabled, runs only between requests; modal dialogs can delay requests. Snapshots and calculation records last only for this agent session."}
 
     def serve_until_stopped(self):
         if threading.get_ident() != self.owner_thread_id:
             raise RuntimeError("Serve from the thread that created the PowerFactory agent.")
         while not self.stop_requested and time.monotonic() < min(self.deadline, self.wait_deadline):
+            if self.gui_pump is not None:
+                self.gui_pump.process_events()
+                self.timeout = 0.02 if self.gui_pump.enabled else 0.25
+            if self.stop_requested or time.monotonic() >= min(self.deadline, self.wait_deadline):
+                break
             self.handle_request()
         if self.stop_requested:
             return "stop_request"
@@ -358,37 +448,69 @@ def remove_own_connection(path, instance_id):
 
 
 def run_agent(app, connection_path, port=PORT, run_seconds=RUN_SECONDS,
-              first_timeout=FIRST_REQUEST_TIMEOUT_SECONDS, idle_timeout=IDLE_TIMEOUT_SECONDS):
+              first_timeout=FIRST_REQUEST_TIMEOUT_SECONDS, idle_timeout=IDLE_TIMEOUT_SECONDS, gui_events=False):
     if app is None or app.GetCurrentScript() is None:
         raise RuntimeError("Launch pf_agent.py through ComPython in the existing PowerFactory GUI.")
     if app.GetCurrentUser() is None:
         raise RuntimeError("Log in to PowerFactory before launching the agent.")
     connection_path = Path(connection_path).resolve()
-    with AgentServer(app, port, run_seconds, first_timeout, idle_timeout) as server:
-        try:
-            write_connection(connection_path, server.connection_info())
-            app.PrintPlain("[PF MCP] Listening at " + server.connection_info()["base_url"])
-            app.PrintPlain("[PF MCP] Inspection and explicit calculation work session. GUI busy until this script ends.")
-            app.PrintPlain("[PF MCP] First request: " + str(first_timeout) + " s; idle: "
-                           + str(idle_timeout) + " s; maximum: " + str(run_seconds) + " s.")
-            app.PrintPlain("[PF MCP] Stop from the project folder: python -c \"from pf_bridge import PFBridge; PFBridge().stop()\"")
-            reason = server.serve_until_stopped()
-        finally:
-            remove_own_connection(connection_path, server.instance_id)
-        summary = {"stop_reason": reason, "tool_requests": server.tool_requests}
+    gui = GuiEventPump(app, requested=gui_events)
+    try:
+        with AgentServer(app, port, run_seconds, first_timeout, idle_timeout, gui_pump=gui) as server:
+            try:
+                write_connection(connection_path, server.connection_info())
+                app.PrintPlain("[PF MCP] Listening at " + server.connection_info()["base_url"])
+                if gui.enabled:
+                    app.PrintPlain("[PF MCP] GUI events enabled between requests. Calculations and dialogs remain synchronous.")
+                else:
+                    app.PrintPlain("[PF MCP] GUI event processing disabled; original blocking mode. " + (gui.error or ""))
+                app.PrintPlain("[PF MCP] First request: " + str(first_timeout) + " s; idle: "
+                               + str(idle_timeout) + " s; maximum: " + str(run_seconds) + " s.")
+                app.PrintPlain("[PF MCP] Stop from the project folder: python -c \"from pf_bridge import PFBridge; PFBridge().stop()\"")
+                reason = server.serve_until_stopped()
+            finally:
+                remove_own_connection(connection_path, server.instance_id)
+            summary = {"stop_reason": reason, "tool_requests": server.tool_requests}
+    finally:
+        gui.close()
+    summary["gui"] = gui.status()
     app.PrintPlain("[PF MCP] Finished: " + reason + "; tool requests: " + str(summary["tool_requests"]))
     return summary
 
 
-def main():
+def main(gui_events=True):
     pf = importlib.import_module("powerfactory")
-    # ComPython retains this module between launches; keep one native application owner.
-    app = getattr(pf, "_pf_mcp_application", None)
-    if app is None:
-        app = pf.GetApplication()
+    if getattr(pf, "_pf_mcp_agent_running", False):
+        raise RuntimeError("The MCP agent is already active. Stop it before launching another agent.")
+    pf._pf_mcp_agent_running = True
+    try:
+        # ComPython retains this module between launches; keep one native application owner.
+        app = getattr(pf, "_pf_mcp_application", None)
         if app is not None:
-            pf._pf_mcp_application = app
-    return run_agent(app, default_connection_path())
+            try:
+                app.GetCurrentScript()
+            except RuntimeError as exc:
+                if str(exc) != "'powerfactory.Application' already deleted":
+                    raise
+                # A retained Python wrapper can outlive its native application.
+                pf._pf_mcp_application = None
+                app = None
+        if app is None:
+            app = pf.GetApplication()
+            if app is not None:
+                try:
+                    app.GetCurrentScript()
+                except RuntimeError as exc:
+                    if str(exc) != "'powerfactory.Application' already deleted":
+                        raise
+                    raise RuntimeError(
+                        "PowerFactory returned a deleted application handle. Restart PowerFactory, "
+                        "then launch pf_agent.py through ComPython again."
+                    ) from exc
+                pf._pf_mcp_application = app
+        return run_agent(app, default_connection_path(), gui_events=gui_events)
+    finally:
+        pf._pf_mcp_agent_running = False
 
 
 if __name__ == "__main__":

@@ -102,7 +102,7 @@ OPERATING_SETPOINTS = {"ElmLod": ("plini", "qlini"), "ElmSym": ("pgini", "qgini"
 SETPOINT_UNITS = {"plini": ("W", "kW", "MW"), "pgini": ("W", "kW", "MW"),
                   "qlini": ("var", "kvar", "Mvar"), "qgini": ("var", "kvar", "Mvar")}
 SETPOINT_CONTROLS = ("mode_inp", "av_mode", "ip_ctrl", "c_pstac", "c_psecc", "c_pmod", "scale0", "i_scale", "ngnum")
-IMPLEMENTATION_VERSION = "0.20.0"
+IMPLEMENTATION_VERSION = "0.21.1"
 SUPPORTED_TOOLS = (
     "get_active_session", "get_active_scenario", "list_operation_scenarios", "browse_powerfactory_tree", "activate_study_case",
     "list_network_variations", "activate_network_variation", "deactivate_network_variation",
@@ -990,7 +990,7 @@ def get_graphic_selection(app, info, arguments):
                 "next_offset": offset + len(entries) if offset + len(entries) < len(selected) else None,
                 "read_complete": all(item["mapping_error"] is None for item in entries),
                 "source": "Application.GetDiagramSelection",
-                "note": "This is the native selection in the top diagram, not the browser or script-launch selection. Use inspection.full_name with existing attribute/type/connection tools only when inspection.available is true. Annotations, unsupported classes and non-calculation-relevant objects remain explicit. No selection change, page opening, model edit or calculation. The current synchronous agent keeps the GUI busy; the selection may need to be made before launching it."}
+                "note": "This is the native selection in the top diagram, not the browser or script-launch selection. Use inspection.full_name with existing attribute/type/connection tools only when inspection.available is true. Annotations, unsupported classes and non-calculation-relevant objects remain explicit. No selection change, page opening, model edit or calculation. With idle GUI mode enabled, selections can change between requests; otherwise select before launching. Check get_active_session.session.gui."}
     if len(json.dumps(response, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 786432:
         raise RequestError("GRAPHIC_RESPONSE_TOO_LARGE", "Selection metadata exceeds the response budget; request a smaller page.", 409)
     return response

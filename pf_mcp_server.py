@@ -203,6 +203,10 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
 
         session includes start/expiry times, remaining lifetime/idle estimates,
         configured time limits, calculation record count and snapshot IDs/count.
+        session.gui reports requested/enabled idle GUI event processing, its
+        counter and any fallback/restoration error. It does not establish that
+        every PowerFactory GUI control is available. Long operations and modal
+        dialogs remain synchronous.
         This call refreshes the idle window. Status waits behind synchronous
         PowerFactory operations; a timeout is not proof that the agent stopped.
         Also returns scenario, active_variations, recording_stage and raw study
@@ -749,8 +753,9 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
         and the session's study case/agent identity for a later highlight request.
         Follow next_offset and check read_complete and per-object mapping errors.
         A missing diagram is an explicit error, distinct from an empty selection.
-        No page opening, selection change, model edit or calculation. The current
-        synchronous agent keeps the GUI busy; select before launching if needed.
+        No page opening, selection change, model edit or calculation. With idle
+        GUI mode enabled, selections can change between requests; otherwise
+        select before launching. Check get_active_session.session.gui.
         """
         return call("get_graphic_selection", {"offset": offset, "limit": limit})
 
