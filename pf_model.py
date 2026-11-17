@@ -40,7 +40,8 @@ def load_profiles(path):
                         and name.startswith(("m:", "c:", "s:")) == results for name in names)
                 and len(set(names)) == len(names))
 
-    for group, prefix in (("elements", "(?:Elm|Rel)"), ("types", "Typ")):
+    for group, prefix in (("elements", "(?:Elm|Rel)"), ("types", "Typ"),
+                          ("protection", "(?:Rel|Typ|Sta|Blk|Cha)")):
         profiles = data.get(group)
         if not isinstance(profiles, dict) or (group == "elements" and not profiles):
             raise ValueError("Missing class profiles: " + group)
@@ -66,6 +67,7 @@ def load_profiles(path):
 PROFILE_DATA = load_profiles(Path(__file__).with_name("pf_profiles.json"))
 ELEMENT_PROFILES = PROFILE_DATA["elements"]
 TYPE_PROFILES = PROFILE_DATA["types"]
+PROTECTION_PROFILES = {**ELEMENT_PROFILES, **TYPE_PROFILES, **PROFILE_DATA["protection"]}
 CALCULATION_PROFILES = PROFILE_DATA["calculations"]
 ELEMENT_CLASSES = tuple(ELEMENT_PROFILES)
 ATTRIBUTE_RESPONSE_BUDGET = 524288
@@ -102,7 +104,7 @@ OPERATING_SETPOINTS = {"ElmLod": ("plini", "qlini"), "ElmSym": ("pgini", "qgini"
 SETPOINT_UNITS = {"plini": ("W", "kW", "MW"), "pgini": ("W", "kW", "MW"),
                   "qlini": ("var", "kvar", "Mvar"), "qgini": ("var", "kvar", "Mvar")}
 SETPOINT_CONTROLS = ("mode_inp", "av_mode", "ip_ctrl", "c_pstac", "c_psecc", "c_pmod", "scale0", "i_scale", "ngnum")
-IMPLEMENTATION_VERSION = "0.21.1"
+IMPLEMENTATION_VERSION = "0.23.0"
 SUPPORTED_TOOLS = (
     "get_active_session", "get_active_scenario", "list_operation_scenarios", "browse_powerfactory_tree", "activate_study_case",
     "list_network_variations", "activate_network_variation", "deactivate_network_variation",
@@ -118,11 +120,13 @@ SUPPORTED_TOOLS = (
     "run_short_circuit_at_bus",
     "set_operating_setpoints",
     "get_protection_chain",
+    "get_protection_settings", "get_protection_response",
+    "inspect_protection_study", "run_short_circuit_fault", "run_protection_sweep", "get_protection_sweep_status", "read_protection_sweep_results",
     "get_graphic_selection", "mark_in_graphics",
     "get_feeder_inventory", "export_graphic",
     "save_operation_scenario", "create_operation_scenario",
 )
-SOURCE_FILES = ("pf_agent.py", "pf_model.py", "pf_connection.py", "pf_profiles.json")
+SOURCE_FILES = ("pf_agent.py", "pf_model.py", "pf_connection.py", "pf_profiles.json", "pf_protection_studies.py")
 CONNECTION_SIDES = {"ElmLne": ("bus1", "bus2"), "ElmTr2": ("bushv", "buslv"),
                     "ElmTr3": ("bushv", "busmv", "buslv"), "ElmCoup": ("bus1", "bus2"),
                     "ElmSym": ("bus1",), "ElmXnet": ("bus1",),
@@ -210,7 +214,8 @@ def powerfactory_capabilities(app):
             "license_status": "unknown", "license_note": "Method availability does not establish a calculation license.",
             "snapshot_limit": 16, "calculation_record_limit": 32,
             "profile_catalog": {"file": "pf_profiles.json", "schema_version": PROFILE_DATA["schema_version"],
-                                "calculations": CALCULATION_PROFILES, "executable_calculations": list(CALCULATION_CLASSES)}}
+                                "calculations": CALCULATION_PROFILES, "executable_calculations": list(CALCULATION_CLASSES),
+                                "protection_classes": list(PROFILE_DATA["protection"])}}
     for key, method in (("installation_directory", "GetInstallationDirectory"), ("interface_version", "GetInterfaceVersion")):
         try:
             data[key] = {"status": "ok", "value": json_attribute_value(getattr(app, method)())}
@@ -290,6 +295,9 @@ def validate_arguments(tool, arguments):
         raise RequestError("INVALID_ARGUMENTS", "tool must be a string.")
     if not isinstance(arguments, dict):
         raise RequestError("INVALID_ARGUMENTS", "arguments must be a JSON object.")
+    if tool in ("inspect_protection_study", "run_short_circuit_fault", "run_protection_sweep", "get_protection_sweep_status", "read_protection_sweep_results"):
+        from pf_protection_studies import validate_arguments as validate_study
+        return validate_study(tool, arguments)
     if tool == "set_operating_setpoints":
         required = {"full_name", "setpoints", "expected_study_case_full_name", "expected_agent_instance_id",
                     "expected_active_scenario_full_name", "expected_recording_stage_full_name"}
@@ -466,17 +474,30 @@ def validate_arguments(tool, arguments):
         if any(part in ("", ".", "..") for part in path["full_name"].split("\\")[1:]):
             raise RequestError("INVALID_ARGUMENTS", "Use an exact listed path without relative or empty segments.")
         return path
-    if tool == "get_protection_chain":
-        if "full_name" not in arguments or set(arguments) - {"full_name", "offset", "limit"}:
+    if tool in ("get_protection_chain", "get_protection_settings", "get_protection_response"):
+        allowed = {"full_name", "offset", "limit"}
+        if tool != "get_protection_chain":
+            allowed.add("attributes")
+        if "full_name" not in arguments or set(arguments) - allowed:
             raise RequestError("INVALID_ARGUMENTS", "Provide one exact relay or cubicle full_name and optional offset/limit.")
         path = arguments["full_name"]
         cls = path.rsplit(".", 1)[-1] if isinstance(path, str) else ""
-        if cls not in ("ElmRelay", "StaCubic"):
+        if tool == "get_protection_settings":
+            if not (cls in ("ElmRelay", "StaCubic", "StaCt", "StaVt", "BlkDef")
+                    or re.fullmatch(r"(?:Rel|Typ|Cha)[A-Za-z0-9_]+", cls)):
+                raise RequestError("INVALID_ARGUMENTS", "Select a protection object, type, characteristic or BlkDef definition.")
+        elif cls not in ("ElmRelay", "StaCubic"):
             raise RequestError("INVALID_ARGUMENTS", "Select an ElmRelay or StaCubic.")
         validate_full_path(path, cls)
         if any(part in ("", ".", "..") for part in path.split("\\")[1:]) or any(char in path for char in "*?"):
             raise RequestError("INVALID_ARGUMENTS", "Use an exact path without wildcards, relative or empty segments.")
-        return {"full_name": path, "element_class": cls, **validate_page(arguments, 50)}
+        result = {"full_name": path, "element_class": cls, **validate_page(arguments, 50)}
+        if tool != "get_protection_chain":
+            names = validate_names(arguments.get("attributes"))
+            if names and any(name.startswith(("m:", "c:", "s:")) != (tool == "get_protection_response") for name in names):
+                raise RequestError("INVALID_ARGUMENTS", "Settings accept only parameter names; responses accept only m:/c:/s: result names.")
+            result["attributes"] = names
+        return result
     if tool == "get_short_circuit_contributions":
         if "bus_full_name" not in arguments or set(arguments) - {"bus_full_name", "offset", "limit"}:
             raise RequestError("INVALID_ARGUMENTS", "Provide one exact bus_full_name and optional offset/limit.")
@@ -1601,6 +1622,8 @@ def calculation_outcome(response):
     execution = ("succeeded" if code == 0 else "failed") if type(code) is int else response.get("status", "indeterminate")
     validity = response.get("validity_after", {}).get("valid")
     results = response.get("results", [])
+    if "samples" in response:
+        results = [{"status": "ok", "data": sample} for sample in response["samples"]]
     requested = response.get("result_requested_count", len(results))
     successful = sum(item.get("data", {}).get("successful_count", 0) for item in results)
     missing = (len(results) != requested or any(item.get("status") != "ok" for item in results)
@@ -2828,9 +2851,120 @@ def browse_powerfactory_tree(app, arguments):
     return response
 
 
-def get_protection_chain(app, info, arguments):
+def get_protection_settings(app, info, arguments):
+    """Read one exact stored object, including inactive objects and library definitions."""
+    context = active_context(app, info)
+    path = arguments["full_name"]
+    roots = [("active_project", app.GetActiveProject)]
+    roots.extend((("current_user", app.GetCurrentUser), ("global_library", app.GetGlobalLibrary)))
+    obj, scope = None, None
+    for candidate_scope, get_root in roots:
+        root = get_root()
+        if root is None:
+            continue
+        root_path = str(root.GetFullName())
+        if not path.startswith(root_path + "\\"):
+            continue
+        obj, scope, current = root, candidate_scope, root_path
+        for part in path[len(root_path) + 1:].split("\\"):
+            current += "\\" + part
+            matches = [child for child in obj.GetContents("*", 0) or []
+                       if child is not None and str(child.GetFullName()) == current]
+            if len(matches) != 1:
+                raise RequestError("PROTECTION_OBJECT_NOT_FOUND", "The exact stored path is missing or ambiguous; browse again.", 404)
+            obj = matches[0]
+        break
+    if obj is None:
+        raise RequestError("PROTECTION_OUT_OF_SCOPE", "Select an exact object in the active project, current user's tree or global library.", 403)
+    if str(obj.GetClassName()) != arguments["element_class"]:
+        raise RequestError("ELEMENT_CLASS_MISMATCH", "The resolved protection object does not match its path.", 409)
+    cls = str(obj.GetClassName())
+    profile = PROTECTION_PROFILES.get(cls)
+    custom = arguments["attributes"]
+    candidates = custom if custom is not None else list(dict.fromkeys([
+        *(profile["parameters"]["extended"] if profile else ("loc_name", "outserv", "typ_id")),
+        # Characteristic assignments are native references, not evaluated settings.
+        "charact",
+    ]))
+    names, unavailable, errors = [], [], []
+    for name in candidates:
+        try:
+            if custom is not None or obj.HasAttribute(name):
+                names.append(name)
+            else:
+                unavailable.append(name)
+        except Exception as exc:
+            errors.append({"attribute": name, "operation": "HasAttribute", "error": (type(exc).__name__ + ": " + str(exc))[:320]})
+    data = attribute_data(obj, names)
+    references = []
+    for name, record in data["attributes"].items():
+        if record["status"] != "ok":
+            continue
+        for key, method in (("native_type", "GetAttributeType"), ("shape", "GetAttributeShape")):
+            try:
+                raw = getattr(obj, method)(name)
+                if key == "native_type":
+                    if not isinstance(raw, (str, int)) and type(raw).__name__ != "AttributeType":
+                        raise ValueError("Expected a native attribute type enum.")
+                    record[key] = str(raw)
+                else:
+                    if not isinstance(raw, (list, tuple)) or len(raw) != 2 or any(type(item) is not int or item < 0 for item in raw):
+                        raise ValueError("Expected a native [rows, columns] shape.")
+                    record[key] = list(raw)
+            except Exception as exc:
+                record[key] = None
+                record.setdefault("metadata_errors", {})[key] = (type(exc).__name__ + ": " + str(exc))[:320]
+        value = record["value"]
+        slots = value if isinstance(value, list) else [value]
+        is_reference = any(isinstance(slot, dict) and slot.get("kind") == "object_reference" for slot in slots)
+        native_type = str(record.get("native_type", ""))
+        is_reference = is_reference or "OBJECT" in native_type or native_type in ("5", "6")
+        if is_reference:
+            for index, slot in enumerate(slots):
+                references.append({"source": describe(obj), "attribute": name,
+                                   "index": index if isinstance(value, list) else None,
+                                   "target": slot, "kind": "stored_reference"})
+    children = []
+    try:
+        for child in obj.GetContents("*", 0) or []:
+            identity = describe(child)
+            if identity is None:
+                continue
+            prefix = path + "\\"
+            if not identity["full_name"].startswith(prefix) or "\\" in identity["full_name"][len(prefix):]:
+                raise ValueError("GetContents returned an object outside direct containment.")
+            children.append(identity)
+    except Exception as exc:
+        errors.append({"operation": "GetContents", "error": (type(exc).__name__ + ": " + str(exc))[:320]})
+    children.sort(key=lambda item: item["full_name"])
+    offset, limit = arguments["offset"], arguments["limit"]
+    page = children[offset:offset + limit]
+    if active_context(app) != context:
+        raise RequestError("SESSION_CHANGED", "The active configuration changed during the protection settings read; query again.", 409)
+    metadata_errors = sum(len(record.get("metadata_errors", {})) for record in data["attributes"].values())
+    response = {**info, **data, "object": describe(obj), "context": context, "resolution_scope": scope,
+                "selection_source": "explicit_attributes" if custom is not None else "pf_profiles.json:" + cls + ".parameters.extended",
+                "profile_available": profile is not None, "unavailable_attributes": unavailable,
+                "metadata_error_count": metadata_errors, "references": references, "children": page,
+                "matched_count": len(children), "returned_count": len(page), "offset": offset, "limit": limit,
+                "next_offset": offset + len(page) if offset + len(page) < len(children) else None,
+                "errors": errors, "read_complete": not errors and data["all_attributes_read"] and not metadata_errors
+                and (custom is not None or profile is not None),
+                "setting_scope": "stored_model_data", "effective_settings_verified": None,
+                "note": "Stored native parameters only, including disabled/inactive objects and definitions. actset/index/outserv and enum values remain raw; group membership, effective active-case settings and manufacturer equivalence are not inferred. Follow exact child/reference paths with this tool; references are not automatically expanded or evaluated. CT/VT, primary/secondary/per-unit values keep their reported units. Pagination covers direct children only. No calculation, activation, write or save is performed."}
+    if len(json.dumps(response, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 786432:
+        raise RequestError("PROTECTION_RESPONSE_TOO_LARGE", "Protection settings exceed the response budget; select fewer attributes or children.", 409)
+    return response
+
+
+def get_protection_response(app, info, arguments):
+    return get_protection_chain(app, info, arguments, include_results=True)
+
+
+def get_protection_chain(app, info, arguments, include_results=False):
     """Read a bounded protection graph; containment is distinct from signal wiring."""
     context = active_context(app, info)
+    validity_before = calculation_validity(app, "short_circuit") if include_results else None
     project_path = info["project"]["full_name"]
     path = arguments["full_name"]
     if not path.startswith(project_path + "\\"):
@@ -2864,7 +2998,7 @@ def get_protection_chain(app, info, arguments):
     def supported(cls):
         return cls in fields or cls.startswith("Rel")
 
-    pending, discovered, nodes, relationships, errors = [root], set(), [], [], []
+    pending, discovered, nodes, relationships, errors = [root], {}, [], [], []
 
     def add(obj):
         full_name = str(obj.GetFullName())
@@ -2872,7 +3006,7 @@ def get_protection_chain(app, info, arguments):
             return False
         if len(discovered) >= 500:
             raise RequestError("PROTECTION_CHAIN_TOO_LARGE", "More than 500 protection objects; select a narrower relay.", 409)
-        discovered.add(full_name)
+        discovered[full_name] = obj
         return True
 
     def failure(obj, operation, exc):
@@ -2906,6 +3040,9 @@ def get_protection_chain(app, info, arguments):
                     "TypCt": ("loc_name", "primtaps", "sectaps"),
                     "TypVt": ("loc_name", "primtaps", "Uinom"),
                 }.get(type_class, ("loc_name",)))
+                if include_results:
+                    type_names = list(dict.fromkeys((*type_names, *(name for name in
+                        ("izone", "aunit", "iphases", "atype", "ienabled") if typ.HasAttribute(name)))))
                 node["equipment_type"] = {"object": describe(typ), **attribute_data(typ, list(type_names))}
             except Exception as exc:
                 failure(obj, "typ_id", exc)
@@ -2952,6 +3089,34 @@ def get_protection_chain(app, info, arguments):
     nodes.sort(key=lambda item: item["object"]["full_name"])
     offset, limit = arguments["offset"], arguments["limit"]
     page = nodes[offset:offset + limit]
+    results_complete = True
+    if include_results:
+        for node in page:
+            obj = discovered[node["object"]["full_name"]]
+            cls = node["object"]["class"]
+            profile = PROTECTION_PROFILES.get(cls, {}).get("results", {}).get("short_circuit", {})
+            custom = arguments["attributes"]
+            candidates = custom if custom is not None else profile.get("attributes", [])
+            names, unavailable, selection_errors = [], [], []
+            for name in candidates:
+                try:
+                    if custom is not None or obj.HasAttribute(name):
+                        names.append(name)
+                    else:
+                        unavailable.append(name)
+                except Exception as exc:
+                    selection_errors.append({"attribute": name, "error": (type(exc).__name__ + ": " + str(exc))[:320]})
+            data = attribute_data(obj, names, response_budget=65536)
+            complete = (bool(names) and data["all_attributes_read"] and not data["metadata_error_count"] and not selection_errors)
+            node.update({"results": data["attributes"], "requested_results": list(candidates),
+                         "unavailable_results": unavailable, "result_errors": selection_errors,
+                         "result_profile_available": bool(profile), "results_complete": complete,
+                         "result_selection_source": "explicit_attributes" if custom is not None else "pf_profiles.json:" + cls + ".results.short_circuit.attributes"})
+            if cls == "ElmRelay" or cls.startswith("Rel") or custom is not None:
+                results_complete = results_complete and complete
+        validity_after = calculation_validity(app, "short_circuit")
+        if active_context(app) != context:
+            raise RequestError("SESSION_CHANGED", "The active configuration changed during the protection response read; query again.", 409)
     page_paths = {item["object"]["full_name"] for item in page}
     failed = any(record["status"] != "ok" or record.get("metadata_errors")
                  for node in nodes for record in node["attributes"].values())
@@ -2965,6 +3130,12 @@ def get_protection_chain(app, info, arguments):
                 "read_complete": not errors and not failed and not failed_types,
                 "scope": "Protection containment plus ElmRelay/RelMultiset.pelm and RelLogdip/RelLogic.pSwitch references; one assigned-type hop.",
                 "note": "Follow next_offset for all nodes and their outgoing relationships. Contains does not mean measurement or trip wiring. Reference array indices are native zero-based slots; null is unassigned. Other reference targets remain metadata_only. Excluded attributes are unavailable on this object. No signal-logic evaluation, inferred breaker association, calculation, settings change or save is performed."}
+    if include_results:
+        response.update({"validity_before": validity_before, "validity_after": validity_after,
+                         "results_complete": results_complete,
+                         "fault_provenance": {"status": "unknown", "calculation_request_id": None,
+                                              "reason": "Live scalar reads are not stored calculation samples; current settings and validity do not identify their fault."},
+                         "results_note": "Existing native scalar responses only; readable values are retained when validity is false or unknown. Results and units depend on the native calculation model; a signal may represent a static time or a dynamic state. Missing values are not zero or nonoperation. Sentinel values, pickup/trip/block states and zone/loop identifiers remain raw with no unverified interpretation. No curve evaluation, grading, coordination assessment or calculation is performed. results_complete covers returned protection nodes only, not fault provenance or freshness; follow next_offset."})
     if len(json.dumps(response, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 786432:
         raise RequestError("PROTECTION_RESPONSE_TOO_LARGE", "Protection data exceeds the response budget; request a smaller page or narrower relay.", 409)
     return response
@@ -2982,6 +3153,10 @@ def execute_read(app, tool, arguments):
         return get_short_circuit_contributions(app, info, arguments)
     if tool == "get_protection_chain":
         return get_protection_chain(app, info, arguments)
+    if tool == "get_protection_settings":
+        return get_protection_settings(app, info, arguments)
+    if tool == "get_protection_response":
+        return get_protection_response(app, info, arguments)
     if tool == "list_expansion_stages":
         return list_expansion_stages(app, info, arguments)
     if tool == "get_power_balance":

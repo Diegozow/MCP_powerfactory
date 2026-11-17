@@ -27,6 +27,7 @@ if getattr(sys.modules.get("powerfactory"), "_pf_mcp_agent_running", False):
 # ComPython can retain imported modules between script launches.
 importlib.reload(importlib.import_module("pf_connection"))
 importlib.reload(importlib.import_module("pf_model"))
+importlib.reload(importlib.import_module("pf_protection_studies"))
 from pf_connection import default_connection_path, prepare_private_directory
 from pf_model import (
     CALCULATION_TOOLS, RequestError, execute_read, list_calculation_commands,
@@ -36,6 +37,10 @@ from pf_model import (
     list_network_variations, change_network_variation,
     activate_operation_scenario, set_study_time, powerfactory_capabilities, IMPLEMENTATION_VERSION,
     export_graphic, write_operation_scenario, mark_in_graphics, run_short_circuit_at_bus, set_operating_setpoints,
+)
+from pf_protection_studies import (
+    inspect_protection_study, run_short_circuit_fault, run_protection_sweep, get_protection_sweep_status,
+    read_protection_sweep_results,
 )
 
 
@@ -126,6 +131,8 @@ class GuiEventPump:
 
 
 def execute_tool(server, tool, arguments):
+    if tool == "get_protection_sweep_status":
+        return get_protection_sweep_status(arguments)
     if tool == "get_powerfactory_capabilities":
         return powerfactory_capabilities(server.app)
     if tool == "browse_powerfactory_tree":
@@ -133,6 +140,14 @@ def execute_tool(server, tool, arguments):
     if tool == "activate_study_case":
         return activate_study_case(server.app, server.instance_id, arguments)
     info = session_info(server.app)
+    if tool == "inspect_protection_study":
+        return inspect_protection_study(server.app, info, arguments)
+    if tool == "read_protection_sweep_results":
+        return read_protection_sweep_results(server.app, info, arguments)
+    if tool == "run_short_circuit_fault":
+        return run_short_circuit_fault(server.app, server.instance_id, server.calculation_records, info, arguments)
+    if tool == "run_protection_sweep":
+        return run_protection_sweep(server.app, server.instance_id, info, arguments)
     if tool == "set_operating_setpoints":
         return set_operating_setpoints(server.app, server.instance_id, info, arguments)
     if tool in ("save_operation_scenario", "create_operation_scenario"):
@@ -252,7 +267,7 @@ class AgentServer(HTTPServer):
                 "calculation_record_count": len(self.calculation_records), "snapshot_count": len(self.snapshots),
                 "snapshot_ids": sorted(self.snapshots), "snapshot_limit": 16,
                 "gui": self.gui_pump.status() if self.gui_pump is not None else {"requested": False, "event_pump_enabled": False},
-                "note": "This call refreshes the idle window. Times are estimates at response creation. Operations are synchronous; status calls wait behind PowerFactory work. GUI event processing, when enabled, runs only between requests; modal dialogs can delay requests. Snapshots and calculation records last only for this agent session."}
+                "note": "This call refreshes the idle window. Times are estimates at response creation. Operations are synchronous; status calls wait behind PowerFactory work. GUI event processing, when enabled, runs only between requests; modal dialogs can delay requests. Snapshots and calculation records last only for this agent session. Protection-sweep steps use durable files and are excluded from calculation_record_count; inspect get_protection_sweep_status."}
 
     def serve_until_stopped(self):
         if threading.get_ident() != self.owner_thread_id:
@@ -409,7 +424,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 "powerfactory_process_id": os.getpid(), "tool": tool,
                 "data": data,
                 "execution": {
-                    "source": "live_powerfactory_session", "read_only": tool not in CALCULATION_TOOLS and tool not in ("capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic", "mark_in_graphics") and (tool not in ("save_operation_scenario", "create_operation_scenario", "run_short_circuit_at_bus", "set_operating_setpoints") or arguments["confirmation_digest"] is None),
+                    "source": "live_powerfactory_session", "read_only": tool not in CALCULATION_TOOLS and tool not in ("capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic", "mark_in_graphics") and (tool not in ("save_operation_scenario", "create_operation_scenario", "run_short_circuit_at_bus", "set_operating_setpoints", "run_short_circuit_fault", "run_protection_sweep") or arguments["confirmation_digest"] is None) and (tool != "read_protection_sweep_results" or arguments["file_name"] is None),
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     "script_thread_id": self.server.owner_thread_id,
                     "api_call_thread_id": api_thread_id,

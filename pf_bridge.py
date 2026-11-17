@@ -83,9 +83,14 @@ class PFBridge:
                 with response:
                     status, raw = response.status, response.read(1048577)
             except (URLError, OSError, HTTPException) as exc:
+                if fields.get("tool") == "read_protection_sweep_results" and fields.get("arguments", {}).get("file_name") is not None:
+                    raise BridgeError("RECORDED_EXPORT_OUTCOME_UNKNOWN", "No recorded-page export response was received. No calculation was requested. Inspect the requested artifact before retrying; existing files are never overwritten.") from exc
                 if fields.get("tool") == "set_operating_setpoints" and fields.get("arguments", {}).get("confirmation_digest") is not None:
                     raise BridgeError("SETPOINT_OUTCOME_UNKNOWN", "No setpoint response was received. A timeout does not cancel setters or undo partial writes. Read get_active_session and the exact element's P/Q inputs and units before further work. Native auto-save may persist changes. Do not automatically retry, restore, calculate, save or restart.") from exc
-                if fields.get("tool") == "run_short_circuit_at_bus" and fields.get("arguments", {}).get("confirmation_digest") is not None:
+                if fields.get("tool") == "run_protection_sweep" and fields.get("arguments", {}).get("confirmation_digest") is not None:
+                    args = fields.get("arguments", {})
+                    raise BridgeError("SWEEP_OUTCOME_UNKNOWN", "No sweep response was received for sweep_id=" + str(args.get("sweep_id")) + ", request_id=" + str(args.get("request_id")) + ". A timeout does not cancel native work or restoration. Read get_protection_sweep_status with these IDs and inspect get_active_session. Do not automatically resume, clear checkpoints, retry or restart.") from exc
+                if fields.get("tool") in ("run_short_circuit_at_bus", "run_short_circuit_fault") and fields.get("arguments", {}).get("confirmation_digest") is not None:
                     request_id = fields.get("arguments", {}).get("request_id", "unknown")
                     raise BridgeError("FAULT_WORKFLOW_OUTCOME_UNKNOWN", "No fault-workflow response was received for request_id=" + str(request_id) + ". A timeout does not cancel configuration, Execute or restoration. Query get_calculation_status with that ID in the same agent session and inspect command settings; execution and restoration outcomes are separately unknown. Do not automatically rerun or restart. Restoring settings does not restore prior results.") from exc
                 if fields.get("tool") in ("save_operation_scenario", "create_operation_scenario") and fields.get("arguments", {}).get("confirmation_digest") is not None:
@@ -143,7 +148,7 @@ class PFBridge:
                         or payload.get("tool") != fields.get("tool")
                         or not isinstance(payload.get("data"), dict)
                         or execution.get("source") != "live_powerfactory_session"
-                        or execution.get("read_only") is not (fields.get("tool") not in ("run_power_flow", "run_short_circuit", "capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic", "mark_in_graphics") and (fields.get("tool") not in ("save_operation_scenario", "create_operation_scenario", "run_short_circuit_at_bus", "set_operating_setpoints") or fields.get("arguments", {}).get("confirmation_digest") is None))
+                        or execution.get("read_only") is not (fields.get("tool") not in ("run_power_flow", "run_short_circuit", "capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic", "mark_in_graphics") and (fields.get("tool") not in ("save_operation_scenario", "create_operation_scenario", "run_short_circuit_at_bus", "set_operating_setpoints", "run_short_circuit_fault", "run_protection_sweep") or fields.get("arguments", {}).get("confirmation_digest") is None) and (fields.get("tool") != "read_protection_sweep_results" or fields.get("arguments", {}).get("file_name") is None))
                         or execution.get("api_calls_on_script_thread") is not True
                         or type(execution.get("script_thread_id")) is not int
                         or execution.get("api_call_thread_id") != execution.get("script_thread_id")):

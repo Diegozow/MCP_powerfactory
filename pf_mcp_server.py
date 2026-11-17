@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pf_bridge import BridgeError, PFBridge
 from pf_connection import default_connection_path
-from pf_model import PROFILE_DATA, IMPLEMENTATION_VERSION
+from pf_model import PROFILE_DATA, IMPLEMENTATION_VERSION, SOURCE_FILES
 
 
 _profiles = PROFILE_DATA
@@ -39,6 +39,37 @@ class OperatingSetpoint(BaseModel):
     value: Annotated[float, Field(strict=True, allow_inf_nan=False)]
     expected_value: Annotated[float, Field(strict=True, allow_inf_nan=False)]
     unit: Literal["W", "kW", "MW", "var", "kvar", "Mvar"]
+
+
+class ProtectionFault(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_full_name: FullName
+    fault_type: Literal["3psc", "2psc", "spgf", "2pgf"]
+    phases: Literal["abc", "ab", "bc", "ca", "a", "b", "c"]
+    resistance_ohm: Annotated[float, Field(ge=0, le=1e6, strict=True, allow_inf_nan=False)]
+    reactance_ohm: Annotated[float, Field(ge=0, le=1e6, strict=True, allow_inf_nan=False)]
+    method: Literal["iec_60909", "complete"]
+    position_percent: Annotated[float, Field(ge=0, le=100, strict=True, allow_inf_nan=False)] | None = None
+    reference_end: Literal["bus1", "bus2"] | None = None
+    prefault: Literal["configured", "load_flow", "nominal_voltage"] = "configured"
+    voltage_factor: Annotated[float, Field(ge=0.01, le=2, strict=True, allow_inf_nan=False)] | None = None
+
+
+class ProtectionChannel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    full_name: FullName
+    attributes: Annotated[list[AttributeName], Field(min_length=1, max_length=32)]
+
+
+class ProtectionStep(ProtectionFault):
+    step_id: SnapshotId
+    scenario_full_name: FullName | None
+
+
+class RecordedProtectionColumn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    index: Annotated[int, Field(ge=0, le=1000000, strict=True)]
+    value_kind: Literal["number", "object"] = "number"
 
 
 def write_result_export(data, file_name):
@@ -148,6 +179,8 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
             "Use get_element_connections for fixed endpoint/cubicle/busbar and switch-state reads on lines, transformers and ElmCoup; physical wiring, switch position and service state are separate. "
             "Use get_short_circuit_contributions for native bus Ikss/angle and directly connected element-end currents, connection states, current fault settings and validity; no calculation or source tracing is performed. "
             "Use get_protection_chain for one exact ElmRelay or StaCubic: native protection containment, pelm measurement/block references, pSwitch references and assigned types. Contains is not proof of trip wiring; follow next_offset and check read_complete/errors. "
+            "Use get_protection_settings for exact stored protection blocks, groups, types, CT/VT, characteristics and BlkDef definitions, including inactive/disabled objects. Follow its child/reference paths explicitly; stored parameters do not prove effective settings. "
+            "Use get_protection_response for a paginated relay/cubicle graph with native scalar responses and validity. Fault provenance stays unknown; missing values and raw sentinel values must not be interpreted as zero time or nonoperation. "
             "Use get_graphic_selection for the current network-diagram selection and exact inspectable model paths. Use mark_in_graphics only when highlighting is requested, with the expected diagram/case/agent; it changes UI state, skips absent/unknown symbols and can activate another already open diagram. Highlighting is distinct from selection; inspect observed after-state and do not treat native_call_completed as visual verification. "
             "Use get_feeder_inventory without a path to discover native feeder definitions, then select an exact feeder for membership; valid load-flow results are required and no calculation runs. "
             "Use export_graphic only for an explicit existing SetDeskpage/GrpPage under the active case's Graphics Board and a new PNG/SVG/PDF basename in exports; it creates a standard ComWr once if missing. Check command_created, export_complete and restoration_errors. "
@@ -173,6 +206,7 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
             "Run a calculation only when requested by the user. First list_calculation_commands and inspect its current raw settings. "
             "run_power_flow and run_short_circuit execute only an existing ComLdf/ComShc with its GUI settings; no option overrides or object creation. "
             "Use run_short_circuit_at_bus for an explicitly requested fault at one exact bus. Omit confirmation_digest for a read-only preview, then use the reviewed digest for authorized execution and settings restoration. Inspect execution and restoration separately; restoring settings does not restore prior results. "
+            "Use run_short_circuit_fault for a reviewed exact bus/line-position fault with explicit phases, Rf/Xf, method and pre-fault options. Use inspect_protection_study to discover native SetPath, sweep and plot definitions. run_protection_sweep executes only reviewed bounded chunks with durable step IDs and artifacts; get_protection_sweep_status reads recovery evidence after timeouts or restarts. read_protection_sweep_results discovers and reads/exports bounded existing ElmRes pages with explicit numeric/object channels and no calculation. Never automatically repeat uncertain native work or clear its checkpoints. Native validation gates remain documented in these tools. "
             "Copy the exact command and study-case paths and expected_agent_instance_id from the session envelope; provide a unique request_id known before execution. "
             "The same ID and arguments replay the stored record within this agent session instead of executing twice. "
             "A timeout does not cancel Execute: query get_calculation_status, do not automatically rerun or restart the agent. "
@@ -192,7 +226,9 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
 
     def call(tool, arguments):
         try:
-            long_call = tool in ("run_power_flow", "run_short_circuit", "run_short_circuit_at_bus", "set_operating_setpoints", "get_calculation_status", "get_line_loading", "capture_result_snapshot", "browse_powerfactory_tree", "activate_study_case", "list_operation_scenarios", "list_network_variations", "list_expansion_stages", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "get_bus_voltage", "get_transformer_loading", "export_results", "set_study_time", "get_power_balance", "get_bus_voltage_sequences", "get_transformer_control_status", "get_element_connections", "get_short_circuit_contributions", "get_protection_chain", "get_graphic_selection", "mark_in_graphics", "get_feeder_inventory", "export_graphic", "save_operation_scenario", "create_operation_scenario")
+            if tool in ("inspect_protection_study", "run_short_circuit_fault", "run_protection_sweep", "get_protection_sweep_status", "read_protection_sweep_results"):
+                return bridge.call(tool, arguments, timeout=calculation_timeout)
+            long_call = tool in ("run_power_flow", "run_short_circuit", "run_short_circuit_at_bus", "set_operating_setpoints", "get_calculation_status", "get_line_loading", "capture_result_snapshot", "browse_powerfactory_tree", "activate_study_case", "list_operation_scenarios", "list_network_variations", "list_expansion_stages", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "get_bus_voltage", "get_transformer_loading", "export_results", "set_study_time", "get_power_balance", "get_bus_voltage_sequences", "get_transformer_control_status", "get_element_connections", "get_short_circuit_contributions", "get_protection_chain", "get_protection_settings", "get_protection_response", "get_graphic_selection", "mark_in_graphics", "get_feeder_inventory", "export_graphic", "save_operation_scenario", "create_operation_scenario")
             return bridge.call(tool, arguments, timeout=calculation_timeout if long_call else None)
         except BridgeError as exc:
             raise ToolError(str(exc)) from exc
@@ -203,6 +239,8 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
 
         session includes start/expiry times, remaining lifetime/idle estimates,
         configured time limits, calculation record count and snapshot IDs/count.
+        Durable protection-sweep steps are excluded from that session count;
+        use get_protection_sweep_status for their checkpoints and results.
         session.gui reports requested/enabled idle GUI event processing, its
         counter and any fallback/restoration error. It does not establish that
         every PowerFactory GUI control is available. Long operations and modal
@@ -228,9 +266,8 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
         catalog = await server.list_tools()
         names = sorted(item.name for item in catalog)
         schemas = {item.name: item.input_schema for item in catalog}
-        source_names = ("pf_agent.py", "pf_model.py", "pf_connection.py", "pf_profiles.json")
         sources = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                   if Path(__file__).with_name(name).exists() else None for name in source_names}
+                   if Path(__file__).with_name(name).exists() else None for name in SOURCE_FILES}
         report = {"server": {"implementation_version": IMPLEMENTATION_VERSION, "tool_names": names,
                              "supported_element_classes": list(_profiles["elements"]),
                              "input_schema_sha256": hashlib.sha256(json.dumps(schemas, sort_keys=True).encode("utf-8")).hexdigest(),
@@ -862,6 +899,66 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
         """
         return call("get_protection_chain", {"full_name": full_name, "offset": offset, "limit": limit})
 
+    @server.tool(title="Read detailed stored protection settings and definitions", annotations=annotations)
+    def get_protection_settings(
+        full_name: FullName,
+        attributes: AttributeList | None = None,
+        offset: Annotated[int, Field(ge=0, le=1000000, strict=True)] = 0,
+        limit: Annotated[int, Field(ge=1, le=50, strict=True)] = 50,
+    ) -> dict[str, Any]:
+        """Read one exact stored protection object, including inactive/disabled data.
+
+        Copy full_name from get_protection_chain, this tool's children/references
+        or browse_powerfactory_tree. Supports ElmRelay, Rel* blocks/groups,
+        StaCt/StaVt, types, characteristics and BlkDef definitions in the active
+        project, current user's tree or global library. Resolves by direct
+        containment, without activation or calculation-relevance filtering.
+
+        Omit attributes for detailed class candidates; explicit attributes are
+        1-100 direct parameter names only. Results and expressions are rejected.
+        Returns native values/units, type/shape, reference slots, unavailable
+        candidates and per-field errors. Select exact references in another call
+        to read assigned types, CT/VT bases, characteristics and definitions.
+        Pagination covers direct children only; follow next_offset.
+
+        Stored actset/index/outserv values and enum metadata remain raw. Neither
+        names nor containment prove active-group membership, enabled functions
+        or effective active-case settings. Inspect profile_available and
+        read_complete; unsupported classes need explicit parameters. No unit
+        conversion, reference evaluation, activation, write, save or calculation.
+        """
+        return call("get_protection_settings", {"full_name": full_name, "attributes": attributes,
+                                               "offset": offset, "limit": limit})
+
+    @server.tool(title="Read existing native relay and block responses", annotations=annotations)
+    def get_protection_response(
+        full_name: FullName,
+        attributes: AttributeList | None = None,
+        offset: Annotated[int, Field(ge=0, le=1000000, strict=True)] = 0,
+        limit: Annotated[int, Field(ge=1, le=50, strict=True)] = 50,
+    ) -> dict[str, Any]:
+        """Read existing scalar responses for an exact active-project relay/cubicle.
+
+        Copy an ElmRelay or StaCubic full_name from existing model/tree/chain
+        readers. Reuses get_protection_chain's bounded containment/references
+        and adds native result records for the returned page. Omit attributes
+        for class candidates, including overcurrent, distance and differential;
+        explicit 1-100 m:/c:/s: names apply to every returned node. Unsupported
+        profiles, unavailable candidates and failed explicit reads stay visible.
+
+        Follow next_offset. results_complete covers this page; read_complete
+        describes the relationship/settings read. Preserve native validity before
+        and after, units, raw states and no-trip sentinel values. Missing results
+        are not zero seconds or nonoperation; signals can mean static times or
+        dynamic states depending on the native calculation model.
+
+        Fault provenance and calculation_request_id remain unknown: current
+        scalar values/settings cannot prove a stored calculation association.
+        No Execute, settings change, curve evaluation or coordination analysis.
+        """
+        return call("get_protection_response", {"full_name": full_name, "attributes": attributes,
+                                               "offset": offset, "limit": limit})
+
     @server.tool(title="Read native short-circuit contributions at a bus", annotations=annotations)
     def get_short_circuit_contributions(
         bus_full_name: FullName,
@@ -1344,6 +1441,166 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
             "expected_agent_instance_id": expected_agent_instance_id, "request_id": request_id,
             "confirmation_digest": confirmation_digest, "result_full_names": result_full_names,
             "result_attributes": result_attributes})
+
+    @server.tool(title="Inspect existing protection paths, sweep commands and plots", annotations=annotations)
+    def inspect_protection_study(
+        object_class: Literal["SetPath", "ComShcsweep", "ComProtgraphic", "VisPlottz"] = "SetPath",
+        full_name: FullName | None = None,
+        offset: Annotated[int, Field(ge=0, le=1000000, strict=True)] = 0,
+        limit: Annotated[int, Field(ge=1, le=50, strict=True)] = 50,
+    ) -> dict[str, Any]:
+        """List or inspect exact existing native protection-study definitions, read-only.
+
+        Omit full_name to list SetPath objects in the active project, or existing
+        ComShcsweep/ComProtgraphic/VisPlottz objects in the active study case.
+        Select an exact returned path with the same object_class for parameters,
+        references and, for SetPath, native membership, forward/reverse branch
+        order and directional device lists. Follow next_offset for all lists.
+        GetAll membership order is not asserted to be electrical traversal.
+
+        Returns selected raw settings, assigned result-file references and
+        unknown license status. No definition creation, Activate or Execute.
+        Native unbounded sweep commands are inspected, not executed here.
+        """
+        return call("inspect_protection_study", {"object_class": object_class, "full_name": full_name,
+                                                  "offset": offset, "limit": limit})
+
+    @server.tool(title="Preview or execute one exact bus or line-position fault", annotations=calculation_annotations)
+    def run_short_circuit_fault(
+        command_full_name: FullName,
+        fault: ProtectionFault,
+        expected_study_case_full_name: FullName,
+        expected_agent_instance_id: Annotated[str, Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")],
+        request_id: CalculationRequestId,
+        channels: Annotated[list[ProtectionChannel], Field(max_length=8)] = [],
+        confirmation_digest: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")] | None = None,
+    ) -> dict[str, Any]:
+        """Omit confirmation_digest for a read-only, deterministic T59 fault preview.
+
+        Use one listed existing ComShc and exact active-project ElmTerm/ElmLne.
+        Line faults require position_percent (0-100) and reference_end bus1/bus2;
+        bus faults omit both. Explicit phases must match 3psc/2psc/spgf/2pgf.
+        Specify Rf/Xf in native ohms and IEC 60909/Complete method. Complete
+        can preserve configured initialisation, use load_flow, or nominal_voltage
+        with an explicit voltage_factor. Other selected native options are shown.
+        Line position requires one existing OptComshc; no object is created.
+        Internal transformer/intercircuit/multiple/enhanced-impedance faults are
+        unsupported; no nearby bus is substituted for a requested location.
+
+        Review before an explicitly authorized confirmed execution. Verify
+        settings_at_execution, return_code, validity, samples and restoration
+        independently. Reads selected 1-32 m:/c:/s: variables per channel BEFORE
+        restoration, including exact Rel* blocks from T55/T58. Records source
+        identity, native containment and fault provenance; no engineering verdict.
+        Captures a bounded appended Output Window slice when verifiable, never
+        clearing it. Restoring settings does not restore prior results/controls.
+
+        Same confirmed request ID replays the stored attempt. After a timeout,
+        query get_calculation_status and inspect context/settings; do not retry
+        with a fresh ID or restart. Native line orientation and changed-setting
+        restoration require live validation before automated study use.
+        """
+        return call("run_short_circuit_fault", {"command_full_name": command_full_name, **fault.model_dump(),
+            "expected_study_case_full_name": expected_study_case_full_name,
+            "expected_agent_instance_id": expected_agent_instance_id, "request_id": request_id,
+            "channels": [channel.model_dump() for channel in channels], "confirmation_digest": confirmation_digest})
+
+    @server.tool(title="Preview or execute a durable bounded protection-sweep chunk", annotations=calculation_annotations)
+    def run_protection_sweep(
+        sweep_id: SnapshotId,
+        request_id: CalculationRequestId,
+        command_full_name: FullName,
+        path_full_name: FullName,
+        steps: Annotated[list[ProtectionStep], Field(min_length=1, max_length=8)],
+        channels: Annotated[list[ProtectionChannel], Field(min_length=1, max_length=8)],
+        expected_study_case_full_name: FullName,
+        expected_agent_instance_id: Annotated[str, Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")],
+        discard_unsaved_scenario_changes: Annotated[bool, Field(strict=True)] = False,
+        confirmation_digest: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")] | None = None,
+    ) -> dict[str, Any]:
+        """Omit confirmation_digest for a read-only T60 chunk preview; creates no files.
+
+        Select an existing SetPath, existing ComShc, 1-8 explicit uniquely named
+        fault steps and 1-8 native scalar channel selections. Each step specifies
+        scenario_full_name explicitly (null means no operation scenario), fault
+        location/type/phases/impedance/method and line position/reference end.
+        Every target must be a native path member. No path or plot is created.
+
+        An authorized confirmation executes sequentially on the ComPython thread,
+        sampling exact native values/units and diagnostics before restoring each
+        command. Scenario switching requires explicit discard permission because
+        unsaved changes cannot be queried reliably. Entry scenario/context is
+        restored and independently verified at the end. Stops on failed execution,
+        restoration or uncertain outcomes; old results/controls are not restored.
+
+        Durable JSON checkpoints precede native mutations. JSON/CSV per-step
+        artifacts retain stable IDs, inputs, source identities, raw sentinel/missing
+        values and result provenance under exports/protection_sweeps/sweep_id.
+        Further chunks use the same sweep_id and new request/step IDs. Finished
+        identical IDs replay historical evidence even across agent restarts;
+        unfinished checkpoints never automatically rerun. Session history's
+        32-record limit does not govern this durable workflow. Inspect
+        get_protection_sweep_status after a timeout before explicit resume.
+
+        This executes explicit bounded ComShc steps. It does not execute a native
+        unbounded ComShcsweep/ComProtgraphic, import recorded ElmRes series or
+        assess coordination. T49/T59 native restoration validation remains a gate
+        before automated use. Each invocation requires reviewed authorization.
+        """
+        return call("run_protection_sweep", {"sweep_id": sweep_id, "request_id": request_id,
+            "command_full_name": command_full_name, "path_full_name": path_full_name,
+            "steps": [step.model_dump() for step in steps], "channels": [channel.model_dump() for channel in channels],
+            "expected_study_case_full_name": expected_study_case_full_name,
+            "expected_agent_instance_id": expected_agent_instance_id,
+            "discard_unsaved_scenario_changes": discard_unsaved_scenario_changes, "confirmation_digest": confirmation_digest})
+
+    @server.tool(title="Read durable protection-sweep progress and artifact locations", annotations=annotations)
+    def get_protection_sweep_status(sweep_id: SnapshotId, request_id: CalculationRequestId) -> dict[str, Any]:
+        """Read the exact durable chunk checkpoint; never executes or clears records.
+
+        Use the IDs chosen before run_protection_sweep, including after timeout
+        or agent restart. Inspect state, per-step artifacts, execution, restoration
+        and recovery_required. Running/unfinished files indicate unknown outcome;
+        do not silently retry, delete checkpoints or repeat under new IDs.
+        Known finished records are historical evidence, not a freshness check.
+        """
+        return call("get_protection_sweep_status", {"sweep_id": sweep_id, "request_id": request_id})
+
+    @server.tool(title="Read or export a bounded page of recorded protection results", annotations=calculation_annotations)
+    def read_protection_sweep_results(
+        source_full_name: FullName,
+        columns: Annotated[list[RecordedProtectionColumn], Field(min_length=1, max_length=8)] | None = None,
+        axis_kind: Literal["number", "object"] = "number",
+        offset: Annotated[int, Field(ge=0, le=1000000, strict=True)] = 0,
+        limit: Annotated[int, Field(ge=1, le=100, strict=True)] = 20,
+        file_name: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}\.(json|csv)$")] | None = None,
+    ) -> dict[str, Any]:
+        """Discover/read existing recorded protection data without Execute or setters.
+
+        Copy an exact ElmRes path from inspection references, or select an
+        existing ComShcsweep/VisPlottz to read its assigned res/p_res. Scope is
+        the active project. Omit columns for paginated channel metadata: offset
+        and limit then select column indices, identities, variables and units.
+        Select 1-8 columns with explicit number/object value_kind to read up to
+        100 rows; offset/limit then select rows. axis_kind selects the native
+        default numeric or object-valued axis, without assuming it represents
+        time. Keeps irregular axes, sparse code-3 unavailable values and native
+        object identities/encoded indices. Missing values never become zero.
+
+        Loads/releases native result-read memory and never Flushes, registers
+        variables, calculates or changes recording settings. Existence and current
+        context do not prove source fault, model revision or freshness; provenance
+        remains unknown. Follow next_offset. Empty files are not successful runs.
+
+        Optional file_name exports this bounded row page to a NEW JSON/CSV under
+        exports/protection_sweeps/recorded; existing files are never overwritten.
+        Omit file_name for a read-only request. Export timeouts leave artifact
+        completion unknown; inspect the file before any retry. Each page can be
+        exported independently for durable large-study processing.
+        """
+        return call("read_protection_sweep_results", {"source_full_name": source_full_name,
+            "columns": None if columns is None else [column.model_dump() for column in columns],
+            "axis_kind": axis_kind, "offset": offset, "limit": limit, "file_name": file_name})
 
     @server.tool(title="Read a stored PowerFactory calculation attempt", annotations=annotations)
     def get_calculation_status(request_id: CalculationRequestId) -> dict[str, Any]:
