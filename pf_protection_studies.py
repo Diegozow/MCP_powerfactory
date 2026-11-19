@@ -94,6 +94,26 @@ def validate_fault(value):
 
 
 def validate_arguments(tool, arguments):
+    if tool == 'list_result_files':
+        if set(arguments) - {'full_name', 'name_contains', 'offset', 'limit'}:
+            fail('INVALID_ARGUMENTS', 'Use full_name or discovery name_contains, plus optional offset/limit.', 400)
+        path = arguments.get('full_name')
+        page = model.validate_page({**arguments, 'limit': arguments.get('limit', 20)}, 100)
+        if path is not None:
+            exact(path, ('ElmRes',))
+            if page['name_contains']:
+                fail('INVALID_ARGUMENTS', 'name_contains applies only to file discovery; omit it for exact column metadata.', 400)
+        return {**page, 'full_name': path}
+    if tool == 'read_result_series':
+        if set(arguments) - {'result_file_full_name', 'columns', 'axis_kind', 'offset', 'limit'} or arguments.get('columns') is None:
+            fail('INVALID_ARGUMENTS', 'Select an exact ElmRes and 1-8 columns, with optional axis_kind/offset/limit.', 400)
+        path = exact(arguments.get('result_file_full_name'), ('ElmRes',))
+        return validate_arguments('read_protection_sweep_results', {
+            **{key: value for key, value in arguments.items() if key != 'result_file_full_name'}, 'source_full_name': path})
+    if tool == 'get_powerfactory_messages':
+        if set(arguments) - {'offset', 'limit'}:
+            fail('INVALID_ARGUMENTS', 'Use only optional message offset/limit; the Output Window is never cleared.', 400)
+        return model.validate_page({**arguments, 'limit': arguments.get('limit', 50)}, 100)
     if tool == 'read_protection_sweep_results':
         if set(arguments) - {'source_full_name', 'columns', 'axis_kind', 'offset', 'limit', 'file_name'}:
             fail('INVALID_ARGUMENTS', 'Unsupported recorded-result argument.', 400)
@@ -764,6 +784,58 @@ def run_protection_sweep(app, instance_id, info, arguments):
         if not uncertain:
             lock_file.unlink()
     return bounded(response)
+
+
+def get_powerfactory_messages(app, arguments):
+    values, error = messages(app)
+    if error is not None:
+        fail('OUTPUT_MESSAGES_UNAVAILABLE', error)
+    offset, limit = arguments['offset'], arguments['limit']
+    rows = []
+    for index in range(offset, min(len(values), offset + limit)):
+        raw = values[index]
+        text = raw.encode('utf-8')[:4096].decode('utf-8', errors='ignore')
+        rows.append({'index': index, 'text': text, 'original_character_count': len(raw), 'truncated': text != raw})
+    following = offset + len(rows)
+    return bounded({'project': model.describe(app.GetActiveProject()), 'study_case': model.describe(app.GetActiveStudyCase()),
+        'source': 'OutputWindow.GetContent()', 'attribution': 'general_session_output',
+        'message_count': len(values), 'messages': rows, 'returned_count': len(rows),
+        'offset': offset, 'limit': limit, 'next_offset': following if following < len(values) else None,
+        'read_complete': all(not row['truncated'] for row in rows), 'message_text_byte_limit': 4096,
+        'note': 'Native message records, not individual lines. Output may belong to unrelated projects or earlier operations; the displayed context does not establish origin. No severity or calculation attribution is inferred. GetContent reads the whole native window before paging. Each returned text is limited to a 4096-byte UTF-8 prefix with explicit truncation. Appends/clears can change page indices between calls. No Clear, Flush, logging change, calculation or model write is performed.'})
+
+
+def list_result_files(app, info, arguments):
+    path = arguments['full_name']
+    if path is not None:
+        response = read_protection_sweep_results(app, info, {
+            'source_full_name': path, 'columns': None, 'axis_kind': 'number',
+            'offset': arguments['offset'], 'limit': arguments['limit'], 'file_name': None})
+        return {**response, 'mode': 'columns', 'storage_structure': 'unknown',
+                'row_index_range': [0, response['row_count'] - 1] if response['row_count'] else None}
+    context = model.active_context(app, info)
+    objects = app.GetActiveProject().GetContents('*.ElmRes', 1)
+    if not isinstance(objects, (list, tuple)) or any(obj is None or str(obj.GetClassName()) != 'ElmRes' for obj in objects):
+        fail('RESULT_DISCOVERY_UNAVAILABLE', 'The project did not return a native ElmRes list.')
+    entries = {str(obj.GetFullName()): model.describe(obj) for obj in objects}
+    if any(not path.startswith(info['project']['full_name'] + '\\') for path in entries):
+        fail('RESULT_DISCOVERY_UNAVAILABLE', 'Native result discovery returned an object outside the active project.')
+    selected = [entry for path, entry in sorted(entries.items())
+                if arguments['name_contains'].casefold() in entry['name'].casefold()]
+    offset, limit = arguments['offset'], arguments['limit']
+    page = selected[offset:offset + limit]
+    if model.active_context(app, info) != context:
+        fail('SESSION_CHANGED', 'The active context changed during result-file discovery.')
+    following = offset + len(page)
+    return bounded({**info, 'context': context, 'mode': 'files', 'result_file_count': len(entries),
+        'matched_count': len(selected), 'result_files': page, 'returned_count': len(page),
+        'offset': offset, 'limit': limit, 'next_offset': following if following < len(selected) else None,
+        'read_complete': context['context_complete'],
+        'note': 'Stored ElmRes identities under the active project, sorted by exact path. No files are loaded during discovery. Select full_name for paginated column metadata and available row indices; Load/Release then manages native read memory. File existence/name, current context and dimensions do not establish a successful calculation, storage density, source revision or freshness.'})
+
+
+def read_result_series(app, info, arguments):
+    return read_protection_sweep_results(app, info, arguments)
 
 
 def recorded_metadata(result, index=None):

@@ -104,18 +104,25 @@ OPERATING_SETPOINTS = {"ElmLod": ("plini", "qlini"), "ElmSym": ("pgini", "qgini"
 SETPOINT_UNITS = {"plini": ("W", "kW", "MW"), "pgini": ("W", "kW", "MW"),
                   "qlini": ("var", "kvar", "Mvar"), "qgini": ("var", "kvar", "Mvar")}
 SETPOINT_CONTROLS = ("mode_inp", "av_mode", "ip_ctrl", "c_pstac", "c_psecc", "c_pmod", "scale0", "i_scale", "ngnum")
-IMPLEMENTATION_VERSION = "0.23.0"
+PYTHON_CONFIGURATION_FIELDS = ("script_id", "filePath", "scriptSourceChoice", "isRemoteScriptSet", "obj_name", "obj_id",
+                               "IntType", "IntName", "IntExpr", "IntUnit", "IntDesc",
+                               "IntResType", "IntResName", "IntResExpr", "IntResUnit", "IntResDesc")
+IMPLEMENTATION_VERSION = "0.27.0"
 SUPPORTED_TOOLS = (
     "get_active_session", "get_active_scenario", "list_operation_scenarios", "browse_powerfactory_tree", "activate_study_case",
     "list_network_variations", "activate_network_variation", "deactivate_network_variation",
     "list_model_elements", "get_line_loading", "capture_result_snapshot", "get_result_snapshot",
     "get_element_attributes", "get_equipment_type_attributes", "get_model_inventory", "list_element_attributes",
     "get_elements_attributes", "list_calculation_commands", "run_power_flow", "run_short_circuit",
+    "run_python_script",
+    "get_python_script_configuration", "configure_python_script",
     "get_calculation_status", "activate_operation_scenario", "get_bus_voltage",
     "get_transformer_loading", "export_results", "get_powerfactory_capabilities",
     "set_study_time", "get_power_balance", "get_bus_voltage_sequences", "get_transformer_control_status",
     "list_expansion_stages",
     "get_element_connections",
+    "get_connected_elements",
+    "list_result_files", "read_result_series", "get_powerfactory_messages",
     "get_short_circuit_contributions",
     "run_short_circuit_at_bus",
     "set_operating_setpoints",
@@ -278,6 +285,16 @@ def validate_request_id(value):
     return value
 
 
+def validate_python_configuration_path(path, object_class=None):
+    cls = path.rsplit(".", 1)[-1] if isinstance(path, str) else ""
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", cls) is None:
+        raise RequestError("INVALID_ARGUMENTS", "Copy an exact PowerFactory object path including its class.")
+    validate_full_path(path, object_class or cls)
+    if any(part in ("", ".", "..") for part in path.split("\\")[1:]) or any(char in path for char in "*?") or path.count("\\") > 64:
+        raise RequestError("INVALID_ARGUMENTS", "Use an exact object path without wildcards, empty or relative segments, at most 64 levels deep.")
+    return path
+
+
 def validate_page(arguments, max_limit=100):
     offset, limit = arguments.get("offset", 0), arguments.get("limit", max_limit)
     needle = arguments.get("name_contains", "")
@@ -295,7 +312,8 @@ def validate_arguments(tool, arguments):
         raise RequestError("INVALID_ARGUMENTS", "tool must be a string.")
     if not isinstance(arguments, dict):
         raise RequestError("INVALID_ARGUMENTS", "arguments must be a JSON object.")
-    if tool in ("inspect_protection_study", "run_short_circuit_fault", "run_protection_sweep", "get_protection_sweep_status", "read_protection_sweep_results"):
+    if tool in ("inspect_protection_study", "run_short_circuit_fault", "run_protection_sweep", "get_protection_sweep_status", "read_protection_sweep_results",
+                "list_result_files", "read_result_series", "get_powerfactory_messages"):
         from pf_protection_studies import validate_arguments as validate_study
         return validate_study(tool, arguments)
     if tool == "set_operating_setpoints":
@@ -465,6 +483,13 @@ def validate_arguments(tool, arguments):
         if path["element_class"] not in ("ElmTr2", "ElmTr3"):
             raise RequestError("INVALID_ARGUMENTS", "Select an ElmTr2 or ElmTr3 transformer.")
         return path
+    if tool == "get_connected_elements":
+        if "bus_full_name" not in arguments or set(arguments) - {"bus_full_name", "offset", "limit"}:
+            raise RequestError("INVALID_ARGUMENTS", "Provide one exact ElmTerm bus_full_name and optional offset/limit.")
+        path = validate_path(arguments["bus_full_name"])
+        if path["element_class"] != "ElmTerm" or any(part in ("", ".", "..") for part in path["full_name"].split("\\")[1:]):
+            raise RequestError("INVALID_ARGUMENTS", "Use one exact ElmTerm path without relative or empty segments.")
+        return {**validate_page({**arguments, "limit": arguments.get("limit", 20)}, 50), "bus_full_name": path["full_name"]}
     if tool == "get_element_connections":
         if set(arguments) != {"full_name"}:
             raise RequestError("INVALID_ARGUMENTS", "Provide one exact line, transformer or switch full_name.")
@@ -636,6 +661,56 @@ def validate_arguments(tool, arguments):
         if set(arguments) != {"request_id"}:
             raise RequestError("INVALID_ARGUMENTS", "Provide only request_id.")
         return {"request_id": validate_request_id(arguments["request_id"])}
+    if tool in ("get_python_script_configuration", "configure_python_script"):
+        required = {"command_full_name"}
+        if tool == "configure_python_script":
+            required |= {"changes", "expected_study_case_full_name", "expected_agent_instance_id"}
+        if not required <= set(arguments) or set(arguments) - required - ({"confirmation_digest"} if tool == "configure_python_script" else set()):
+            raise RequestError("INVALID_ARGUMENTS", "Provide the exact ComPython path and, for edits, changes and expected case/agent; omit confirmation_digest for a preview.")
+        path = validate_python_configuration_path(arguments["command_full_name"], "ComPython")
+        if tool == "get_python_script_configuration":
+            return {"command_full_name": path}
+        case = validate_python_configuration_path(arguments["expected_study_case_full_name"], "IntCase")
+        instance = arguments["expected_agent_instance_id"]
+        if not isinstance(instance, str) or re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", instance) is None:
+            raise RequestError("INVALID_ARGUMENTS", "Copy expected_agent_instance_id from the current session.")
+        changes = arguments["changes"]
+        if not isinstance(changes, dict) or not changes or set(changes) - {"script_reference_full_name", "file_path", "external_objects"}:
+            raise RequestError("INVALID_ARGUMENTS", "Change only script_reference_full_name, file_path and/or existing external_objects.")
+        if changes.get("script_reference_full_name") is not None:
+            validate_python_configuration_path(changes["script_reference_full_name"], "ComPython")
+        if "file_path" in changes and (not isinstance(changes["file_path"], str) or len(changes["file_path"]) > 256 or any(ord(c) < 32 for c in changes["file_path"])):
+            raise RequestError("INVALID_ARGUMENTS", "file_path must be native path text of at most 256 characters; an empty string clears it.")
+        if "external_objects" in changes:
+            bindings = changes["external_objects"]
+            if not isinstance(bindings, list) or not 1 <= len(bindings) <= 32:
+                raise RequestError("INVALID_ARGUMENTS", "Provide 1-32 existing external-object bindings.")
+            names = set()
+            for binding in bindings:
+                if not isinstance(binding, dict) or set(binding) != {"name", "full_name"}:
+                    raise RequestError("INVALID_ARGUMENTS", "Each external object requires only name and full_name (null clears its binding).")
+                name = binding["name"]
+                if not isinstance(name, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) is None or name in names:
+                    raise RequestError("INVALID_ARGUMENTS", "Use unique existing external-object parameter names of at most 64 characters.")
+                names.add(name)
+                if binding["full_name"] is not None:
+                    validate_python_configuration_path(binding["full_name"])
+            changes = {**changes, "external_objects": sorted(bindings, key=lambda item: item["name"])}
+        digest = arguments.get("confirmation_digest")
+        if digest is not None and (not isinstance(digest, str) or re.fullmatch(r"[a-f0-9]{64}", digest) is None):
+            raise RequestError("INVALID_ARGUMENTS", "Copy the reviewed preview's exact confirmation_digest.")
+        return {"command_full_name": path, "expected_study_case_full_name": case, "expected_agent_instance_id": instance,
+                "changes": changes, "confirmation_digest": digest}
+    if tool == "run_python_script":
+        if set(arguments) != {"command_full_name", "expected_study_case_full_name", "expected_agent_instance_id", "request_id"}:
+            raise RequestError("INVALID_ARGUMENTS", "Provide only the exact ComPython path, expected case/agent and request_id. Configure script inputs in PowerFactory.")
+        command = validate_python_configuration_path(arguments["command_full_name"], "ComPython")
+        case = validate_python_configuration_path(arguments["expected_study_case_full_name"], "IntCase")
+        instance = arguments["expected_agent_instance_id"]
+        if not isinstance(instance, str) or re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", instance) is None:
+            raise RequestError("INVALID_ARGUMENTS", "Copy expected_agent_instance_id from the current session.")
+        return {"command_full_name": command, "expected_study_case_full_name": case,
+                "expected_agent_instance_id": instance, "request_id": validate_request_id(arguments["request_id"])}
     if tool == "run_short_circuit_at_bus":
         extra = {"bus_full_name", "fault_type", "confirmation_digest"}
         base = validate_arguments("run_short_circuit", {key: value for key, value in arguments.items() if key not in extra})
@@ -1243,10 +1318,10 @@ def get_feeder_inventory(app, info, arguments):
             "note": "Definitions are native ElmFeeder objects under the active project's Network Data. Membership uses existing valid load-flow results; invalid/unknown validity leaves counts unknown, not zero. Counts cover all native members before class/name filtering and pagination. Nested feeders are included only when requested. No membership is inferred from folder names and no topology trace, calculation or model write is performed."}
 
 
-def get_element_connections(app, info, arguments, obj=None):
+def get_element_connections(app, info, arguments, obj=None, sides=None):
     obj = resolve_element(app, arguments) if obj is None else obj
     context = active_context(app, info)
-    sides = CONNECTION_SIDES[arguments["element_class"]]
+    sides = CONNECTION_SIDES[arguments["element_class"]] if sides is None else sides
 
     def switch_state(switch):
         data = {"switch": describe(switch), "on_off": read_attribute(switch, "on_off"), "closed": None, "error": None}
@@ -1314,6 +1389,55 @@ def get_element_connections(app, info, arguments, obj=None):
                                "terminal_considering_switches": "GetNode(bus_index, 1)", "busbar": "StaCubic.cBusBar",
                                "switch_closed": "ElmCoup/StaSwitch.IsClosed", "in_service": "element.outserv == 0"},
             "note": "Direct terminals/cubicles, resolved busbars, switch-aware node reads, switch positions and the element's own service flag are separate facts. Null read states with errors are unknown; a successful GetNode returning None means no node was found. An empty cubicle-switch list does not cover every series switch in a detailed substation. This is endpoint inspection, not a path/energisation or power-flow assessment. No switch, service state or model data is changed and no calculation is run."}
+
+
+def get_connected_elements(app, info, arguments):
+    bus_path = arguments["bus_full_name"]
+    bus = resolve_element(app, {"full_name": bus_path, "element_class": "ElmTerm"})
+    context = active_context(app, info)
+    native = bus.GetConnectedElements(0, 0, 0)
+    if not isinstance(native, (list, tuple)) or any(obj is None for obj in native):
+        raise RequestError("CONNECTION_DISCOVERY_UNAVAILABLE", "GetConnectedElements did not return a native object list.", 409)
+    objects = {str(obj.GetFullName()): obj for obj in native}
+    entries = sorted(objects.items())
+    sides_by_class = {**CONNECTION_SIDES, **{cls: ("bus1",) for cls in ("ElmLod", "ElmShnt", "ElmSvs", "ElmPvsys", "ElmVac")}}
+    offset, limit = arguments["offset"], arguments["limit"]
+    rows = []
+    for path, obj in entries[offset:offset + limit]:
+        identity = describe(obj)
+        sides = sides_by_class.get(identity["class"])
+        row = {"element": identity, "endpoint_read_supported": sides is not None,
+               "matching_bus_indices": [], "read_complete": False, "error": None}
+        if sides is None:
+            row.update(outserv=read_attribute(obj, "outserv"), in_service=None,
+                       error={"code": "UNSUPPORTED_CONNECTION_CLASS", "message": "Native discovery is retained; endpoint inspection is unavailable for this class."})
+        else:
+            try:
+                connection = get_element_connections(app, info, {"full_name": path, "element_class": identity["class"]}, obj=obj, sides=sides)
+                row.update({key: connection[key] for key in ("outserv", "in_service", "switch_state", "connections")})
+                row["matching_bus_indices"] = [end["bus_index"] for end in connection["connections"]
+                    if end["terminal"] is not None and end["terminal"]["full_name"] == bus_path]
+                row["read_complete"] = bool(connection["read_complete"] and row["matching_bus_indices"])
+                if not row["matching_bus_indices"]:
+                    row["error"] = {"code": "NO_DIRECT_TERMINAL_MATCH", "message": "No physical endpoint matched this exact bus; no endpoint was inferred."}
+            except RequestError as exc:
+                if exc.code == "SESSION_CHANGED":
+                    raise
+                row["error"] = {"code": exc.code, "message": str(exc)}
+            except Exception as exc:
+                row["error"] = {"code": "CONNECTION_READ_FAILED", "message": (type(exc).__name__ + ": " + str(exc))[:320]}
+        rows.append(row)
+    if active_context(app, info) != context:
+        raise RequestError("SESSION_CHANGED", "The active context changed during connected-equipment inspection.", 409)
+    following = offset + len(rows)
+    response = {**info, "context": context, "bus": describe(bus), "connection_source": "ElmTerm.GetConnectedElements(0, 0, 0)",
+        "connected_element_count": len(entries), "returned_count": len(rows), "elements": rows,
+        "offset": offset, "limit": limit, "next_offset": following if following < len(entries) else None,
+        "read_complete": bool(context["context_complete"] and all(row["read_complete"] for row in rows)),
+        "note": "One-hop native discovery, deduplicated and sorted by exact identity. Open switches and out-of-service equipment remain included. Unsupported classes stay in the page with explicit partial status. Physical endpoints, switch-aware nodes, switch states and service states are separate facts; no energisation, source/path tracing, calculation or model change is inferred or performed."}
+    if len(json.dumps(response, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 786432:
+        raise RequestError("CONNECTION_RESPONSE_TOO_LARGE", "Request a smaller connected-equipment page.", 409)
+    return response
 
 
 def get_short_circuit_contributions(app, info, arguments):
@@ -1643,6 +1767,213 @@ def calculation_outcome(response):
             "result_quality": quality, "requested_element_count": requested, "successful_attribute_count": successful,
             **({"settings_restoration": response["restoration"]["status"]} if "restoration" in response else {}),
             "note": "Separate execution, validity and read coverage; this is not independent engineering validation."}
+
+
+def resolve_python_configuration_object(app, path):
+    for get_root in (app.GetActiveProject, app.GetCurrentUser, app.GetGlobalLibrary):
+        root = get_root()
+        if root is None:
+            continue
+        current = str(root.GetFullName())
+        if path != current and not path.startswith(current + "\\"):
+            continue
+        obj = root
+        for part in path[len(current) + 1:].split("\\") if path != current else []:
+            current += "\\" + part
+            matches = [child for child in obj.GetContents("*", 0) or []
+                       if child is not None and str(child.GetFullName()) == current]
+            if len(matches) != 1:
+                raise RequestError("CONFIGURATION_OBJECT_NOT_FOUND", "The exact object path is missing or ambiguous; browse again.", 404)
+            obj = matches[0]
+        if str(obj.GetClassName()) != path.rsplit(".", 1)[-1]:
+            raise RequestError("CONFIGURATION_CLASS_MISMATCH", "The stored object's class does not match the selected path.", 409)
+        return obj
+    raise RequestError("CONFIGURATION_OBJECT_OUT_OF_SCOPE", "Select a visible object in the current user's tree or global library.", 403)
+
+
+def python_configuration_value(command, field, name=None):
+    value = command.GetExternalObject(name) if field == "external_object" else command.GetAttribute(field)
+    if field == "external_object":
+        if not isinstance(value, (list, tuple)) or len(value) != 2 or type(value[0]) is not int or value[0] != 0:
+            raise ValueError("GetExternalObject did not return [0, object].")
+        value = value[1]
+    return describe(value) if field != "filePath" else value
+
+
+def python_configuration_state(command):
+    fields = {name: read_attribute(command, name) for name in PYTHON_CONFIGURATION_FIELDS}
+    names = fields["obj_name"].get("value")
+    bindings, errors = [], []
+    if not isinstance(names, list) or len(names) > 100 or any(not isinstance(n, str) for n in names) or len(set(names)) != len(names):
+        errors.append("External-object names must be a readable list of at most 100 unique names.")
+    else:
+        for name in names:
+            try:
+                bindings.append({"name": name, "object": python_configuration_value(command, "external_object", name)})
+            except Exception as exc:
+                errors.append(name + ": " + (type(exc).__name__ + ": " + str(exc))[:320])
+    return {"attributes": fields, "external_objects": bindings, "errors": errors,
+            "configuration_complete": not errors and all(field["status"] == "ok" for field in fields.values())}
+
+
+def get_python_script_configuration(app, info, arguments):
+    path = arguments["command_full_name"]
+    command = resolve_python_configuration_object(app, path)
+    context = active_context(app, info)
+    state = python_configuration_state(command)
+    if active_context(app, info) != context:
+        raise RequestError("SESSION_CHANGED", "The active context changed during inspection; read again.", 409)
+    return {**info, "command": describe(command), "context": context, "configuration": state,
+            "note": "Stored local configuration only. script_id is the remote ComPython reference; filePath is the script file. Source-selector fields remain native raw values; no execution or effective remote-setting inference is performed."}
+
+
+def configure_python_script(app, instance_id, info, arguments):
+    if arguments["expected_agent_instance_id"] != instance_id:
+        raise RequestError("INSTANCE_MISMATCH", "The agent changed; no configuration was written.", 409)
+    if arguments["expected_study_case_full_name"] != info["study_case"]["full_name"]:
+        raise RequestError("SESSION_CHANGED", "The active case changed; no configuration was written.", 409)
+    before = get_python_script_configuration(app, info, arguments)
+    command = resolve_python_configuration_object(app, arguments["command_full_name"])
+    current_script = app.GetCurrentScript()
+    agent_path = str(current_script.GetFullName()) if current_script is not None else None
+    if arguments["command_full_name"] == agent_path:
+        raise RequestError("AGENT_SCRIPT_REENTRY", "The running agent's own ComPython configuration cannot be changed.", 409)
+    changes, operations, referenced_configuration = arguments["changes"], [], None
+    if "script_reference_full_name" in changes:
+        target_path = changes["script_reference_full_name"]
+        target = resolve_python_configuration_object(app, target_path) if target_path is not None else None
+        seen, link = {arguments["command_full_name"]}, target
+        for _ in range(64):
+            if link is None:
+                break
+            link_path = str(link.GetFullName())
+            if str(link.GetClassName()) != "ComPython" or link_path in seen or link_path == agent_path:
+                raise RequestError("INVALID_SCRIPT_REFERENCE", "Remote references must be ComPython objects without cycles or references to the running agent.", 409)
+            seen.add(link_path)
+            link = link.GetAttribute("script_id")
+        else:
+            raise RequestError("INVALID_SCRIPT_REFERENCE", "The remote-script reference chain exceeds 64 objects.", 409)
+        referenced_configuration = python_configuration_state(target) if target is not None else None
+        operations.append(("script_id", None, target))
+    if "file_path" in changes:
+        operations.append(("filePath", None, changes["file_path"]))
+    existing_names = {item["name"] for item in before["configuration"]["external_objects"]}
+    for binding in changes.get("external_objects", []):
+        if binding["name"] not in existing_names:
+            raise RequestError("EXTERNAL_OBJECT_NOT_DEFINED", "Only existing named external-object bindings can be changed; define new names in PowerFactory first.", 409)
+        target = resolve_python_configuration_object(app, binding["full_name"]) if binding["full_name"] is not None else None
+        operations.append(("external_object", binding["name"], target))
+    requested = [{"field": field, "name": name, "value": describe(value) if field != "filePath" else value}
+                 for field, name, value in operations]
+    preview = {"agent_instance_id": instance_id, **before, "requested": requested,
+               "referenced_configuration": referenced_configuration,
+               "effects": "Changes only the requested script reference, file path and existing external-object bindings. Selecting a remote script can replace native settings. The file/embedded source selector is not assigned. No script execution, file creation, explicit save or rollback is performed; native auto-save may persist edits."}
+    ready = (before["context"]["context_complete"] and before["configuration"]["configuration_complete"]
+             and (referenced_configuration is None or referenced_configuration["configuration_complete"]))
+    digest = hashlib.sha256(json.dumps(preview, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+    if active_context(app, info) != before["context"] or python_configuration_state(command) != before["configuration"]:
+        raise RequestError("CONFIGURATION_PREVIEW_CHANGED", "The context or configuration changed during preparation; nothing was written.", 409)
+    confirmation = arguments["confirmation_digest"]
+    if confirmation is None:
+        return {**info, "status": "preview", "preview": preview, "ready_to_confirm": ready,
+                "confirmation_digest": digest if ready else None, "write_attempted": False, "success": None}
+    if not ready or confirmation != digest:
+        raise RequestError("CONFIGURATION_PREVIEW_CHANGED", "The preview is incomplete or stale; request and review a new preview. Nothing was written.", 409)
+    attempts, error = [], None
+    try:
+        for (field, name, value), desired in zip(operations, requested):
+            observed = python_configuration_value(command, field, name)
+            if observed == desired["value"]:
+                continue
+            attempt = {**desired, "verified": False}
+            attempts.append(attempt)
+            code = command.SetExternalObject(name, value) if field == "external_object" else command.SetAttribute(field, value)
+            attempt["return_code"] = code if type(code) is int else None
+            if field == "external_object" and (type(code) is not int or code != 0):
+                raise ValueError("SetExternalObject did not return integer zero.")
+            attempt["verified"] = python_configuration_value(command, field, name) == desired["value"]
+            if not attempt["verified"]:
+                raise ValueError("Requested configuration did not match native readback.")
+    except Exception as exc:
+        error = {"code": "PYTHON_CONFIGURATION_WRITE_FAILED", "message": (type(exc).__name__ + ": " + str(exc))[:320]}
+    after, context_after = python_configuration_state(command), None
+    try:
+        context_after = active_context(app)
+    except Exception as exc:
+        error = error or {"code": "CONTEXT_READ_FAILED", "message": (type(exc).__name__ + ": " + str(exc))[:320]}
+    bindings = {item["name"]: item["object"] for item in after["external_objects"]}
+    verified = True
+    for item in requested:
+        if item["field"] == "external_object":
+            verified = verified and item["name"] in bindings and bindings[item["name"]] == item["value"]
+        else:
+            entry = after["attributes"][item["field"]]
+            value = entry.get("value")
+            if isinstance(value, dict):
+                value = {key: val for key, val in value.items() if key != "kind"}
+            verified = verified and entry["status"] == "ok" and value == item["value"]
+    success = error is None and verified and after["configuration_complete"] and context_after == before["context"]
+    if not success and error is None:
+        error = {"code": "PYTHON_CONFIGURATION_VERIFICATION_FAILED", "message": "Requested values, complete configuration readback or unchanged context could not be verified. Inspect the returned after-state before further work."}
+    return {**info, "command": before["command"], "status": "succeeded" if success else "failed", "success": success,
+            "write_attempted": bool(attempts), "attempts": attempts, "requested": requested, "requested_values_verified": verified,
+            "configuration_before": before["configuration"], "configuration_after": after,
+            "changed_fields": [name for name in PYTHON_CONFIGURATION_FIELDS if before["configuration"]["attributes"][name] != after["attributes"][name]],
+            "context_after": context_after, "context_unchanged": context_after == before["context"], "error": error,
+            "note": "Partial changes remain visible. No script execution, explicit save or automatic rollback was performed. Inspect configuration_after before any retry."}
+
+
+def run_python_script(app, instance_id, calculation_records, arguments):
+    if arguments["expected_agent_instance_id"] != instance_id:
+        raise RequestError("INSTANCE_MISMATCH", "The agent restarted; nothing was executed. Refresh the session before new work.", 409)
+    request_id = arguments["request_id"]
+    signature = json.dumps({"tool": "run_python_script", "arguments": arguments}, sort_keys=True, ensure_ascii=False)
+    if request_id in calculation_records:
+        prior = calculation_records[request_id]
+        if prior["signature"] != signature:
+            raise RequestError("REQUEST_ID_CONFLICT", "This request_id already identifies different execution arguments.", 409)
+        return {**prior["response"], "replayed": True}
+    if len(calculation_records) >= 32:
+        raise RequestError("CALCULATION_HISTORY_FULL", "This agent has recorded 32 execution attempts; start a new work session.", 409)
+    info = session_info(app)
+    if info["study_case"]["full_name"] != arguments["expected_study_case_full_name"]:
+        raise RequestError("SESSION_CHANGED", "The active study case differs from the expected path; nothing was executed.", 409)
+    path = arguments["command_full_name"]
+    command = resolve_python_configuration_object(app, path)
+    current_script = app.GetCurrentScript()
+    if current_script is not None and str(current_script.GetFullName()) == path:
+        raise RequestError("AGENT_SCRIPT_REENTRY", "The running MCP agent's own ComPython cannot be executed recursively.", 409)
+    context = active_context(app, info)
+    if session_info(app) != info:
+        raise RequestError("SESSION_CHANGED", "The active session changed during preparation; nothing was executed.", 409)
+    response = {**info, "request_id": request_id, "calculation": "python_script", "command": describe(command),
+                "context_before": context, "status": "running", "success": False, "replayed": False,
+                "started_at_utc": datetime.now(timezone.utc).isoformat(), "return_code": None,
+                "results": [], "results_read": False, "result_requested_count": 0,
+                "effects": "Executes the existing ComPython with configured inputs in the current active context. No project/case activation is requested for outside scripts. The script can change model data, context, results and files or perform external actions. No rollback is provided.",
+                "note": "Integer zero reports native Execute completion only, not script correctness. Script output stays in PowerFactory's Output Window; no result values or stdout are captured."}
+    calculation_records[request_id] = {"signature": signature, "response": response}
+    started = time.perf_counter()
+    try:
+        code = command.Execute()
+        response["return_code"] = code if type(code) is int else None
+        if type(code) is not int:
+            response.update(status="indeterminate", error={"code": "UNEXPECTED_EXECUTE_RETURN", "message": "Execute returned " + type(code).__name__ + "; do not assume success or retry under a new ID."})
+        elif code != 0:
+            response.update(status="failed", error={"code": "PYTHON_SCRIPT_FAILED", "message": "Execute returned a nonzero code. Inspect PowerFactory's Output Window; partial effects may remain."})
+        else:
+            response.update(status="succeeded", success=True)
+    except (Exception, SystemExit) as exc:
+        response.update(status="indeterminate", error={"code": "PYTHON_SCRIPT_EXECUTION_EXCEPTION", "message": (type(exc).__name__ + ": " + str(exc))[:320]})
+    response["execute_ms"] = round((time.perf_counter() - started) * 1000, 2)
+    response["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+    try:
+        response["context_after"] = active_context(app)
+    except Exception as exc:
+        response["context_after"] = None
+        response["context_error"] = (type(exc).__name__ + ": " + str(exc))[:320]
+    response["outcome"] = calculation_outcome(response)
+    return response
 
 
 def run_calculation(app, instance_id, calculation_records, info, tool, arguments):
@@ -3149,6 +3480,8 @@ def execute_read(app, tool, arguments):
         return get_feeder_inventory(app, info, arguments)
     if tool == "get_element_connections":
         return get_element_connections(app, info, arguments)
+    if tool == "get_connected_elements":
+        return get_connected_elements(app, info, arguments)
     if tool == "get_short_circuit_contributions":
         return get_short_circuit_contributions(app, info, arguments)
     if tool == "get_protection_chain":

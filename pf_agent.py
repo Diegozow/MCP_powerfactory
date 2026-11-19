@@ -30,8 +30,9 @@ importlib.reload(importlib.import_module("pf_model"))
 importlib.reload(importlib.import_module("pf_protection_studies"))
 from pf_connection import default_connection_path, prepare_private_directory
 from pf_model import (
-    CALCULATION_TOOLS, RequestError, execute_read, list_calculation_commands,
-    run_calculation, session_info, validate_arguments, calculation_outcome,
+    CALCULATION_TOOLS, RequestError, describe, execute_read, list_calculation_commands,
+    run_calculation, run_python_script, get_python_script_configuration, configure_python_script,
+    session_info, validate_arguments, calculation_outcome,
     capture_result_snapshot,
     browse_powerfactory_tree, activate_study_case,
     list_network_variations, change_network_variation,
@@ -40,7 +41,7 @@ from pf_model import (
 )
 from pf_protection_studies import (
     inspect_protection_study, run_short_circuit_fault, run_protection_sweep, get_protection_sweep_status,
-    read_protection_sweep_results,
+    read_protection_sweep_results, list_result_files, read_result_series, get_powerfactory_messages,
 )
 
 
@@ -131,6 +132,18 @@ class GuiEventPump:
 
 
 def execute_tool(server, tool, arguments):
+    if tool == "get_powerfactory_messages":
+        return get_powerfactory_messages(server.app, arguments)
+    if tool == "run_python_script":
+        return run_python_script(server.app, server.instance_id, server.calculation_records, arguments)
+    if tool == "get_calculation_status":
+        record = server.calculation_records.get(arguments["request_id"])
+        if record is None:
+            raise RequestError("CALCULATION_RECORD_NOT_FOUND", "No execution record with this ID exists in this agent session; this query executed nothing.", 404)
+        return {"project": describe(server.app.GetActiveProject()), "study_case": describe(server.app.GetActiveStudyCase()),
+                "request_id": arguments["request_id"],
+                "record": {**record["response"], "outcome": calculation_outcome(record["response"])},
+                "historical_record": True, "note": "This is the stored attempt, not a freshness check. Records are lost when ComPython stops; do not automatically retry after an agent restart."}
     if tool == "get_protection_sweep_status":
         return get_protection_sweep_status(arguments)
     if tool == "get_powerfactory_capabilities":
@@ -140,10 +153,18 @@ def execute_tool(server, tool, arguments):
     if tool == "activate_study_case":
         return activate_study_case(server.app, server.instance_id, arguments)
     info = session_info(server.app)
+    if tool == "get_python_script_configuration":
+        return get_python_script_configuration(server.app, info, arguments)
+    if tool == "configure_python_script":
+        return configure_python_script(server.app, server.instance_id, info, arguments)
     if tool == "inspect_protection_study":
         return inspect_protection_study(server.app, info, arguments)
     if tool == "read_protection_sweep_results":
         return read_protection_sweep_results(server.app, info, arguments)
+    if tool == "list_result_files":
+        return list_result_files(server.app, info, arguments)
+    if tool == "read_result_series":
+        return read_result_series(server.app, info, arguments)
     if tool == "run_short_circuit_fault":
         return run_short_circuit_fault(server.app, server.instance_id, server.calculation_records, info, arguments)
     if tool == "run_protection_sweep":
@@ -201,13 +222,6 @@ def execute_tool(server, tool, arguments):
         return run_short_circuit_at_bus(server.app, server.instance_id, server.calculation_records, info, arguments)
     if tool in CALCULATION_TOOLS:
         return run_calculation(server.app, server.instance_id, server.calculation_records, info, tool, arguments)
-    if tool == "get_calculation_status":
-        record = server.calculation_records.get(arguments["request_id"])
-        if record is None:
-            raise RequestError("CALCULATION_RECORD_NOT_FOUND", "No execution record with this ID exists in this agent session; no calculation was run by this query.", 404)
-        return {**info, "request_id": arguments["request_id"],
-                "record": {**record["response"], "outcome": calculation_outcome(record["response"])},
-                "historical_record": True, "note": "This is the stored attempt, not a freshness check. Records are lost when ComPython stops; do not automatically retry after an agent restart."}
     return execute_read(server.app, tool, arguments)
 
 
@@ -424,7 +438,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 "powerfactory_process_id": os.getpid(), "tool": tool,
                 "data": data,
                 "execution": {
-                    "source": "live_powerfactory_session", "read_only": tool not in CALCULATION_TOOLS and tool not in ("capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic", "mark_in_graphics") and (tool not in ("save_operation_scenario", "create_operation_scenario", "run_short_circuit_at_bus", "set_operating_setpoints", "run_short_circuit_fault", "run_protection_sweep") or arguments["confirmation_digest"] is None) and (tool != "read_protection_sweep_results" or arguments["file_name"] is None),
+                    "source": "live_powerfactory_session", "read_only": tool not in CALCULATION_TOOLS and tool not in ("run_python_script", "capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic", "mark_in_graphics") and (tool not in ("configure_python_script", "save_operation_scenario", "create_operation_scenario", "run_short_circuit_at_bus", "set_operating_setpoints", "run_short_circuit_fault", "run_protection_sweep") or arguments["confirmation_digest"] is None) and (tool != "read_protection_sweep_results" or arguments["file_name"] is None),
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     "script_thread_id": self.server.owner_thread_id,
                     "api_call_thread_id": api_thread_id,

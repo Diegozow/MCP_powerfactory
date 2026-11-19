@@ -41,6 +41,19 @@ class OperatingSetpoint(BaseModel):
     unit: Literal["W", "kW", "MW", "var", "kvar", "Mvar"]
 
 
+class PythonExternalObject(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")]
+    full_name: FullName | None
+
+
+class PythonScriptChanges(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    script_reference_full_name: FullName | None = None
+    file_path: Annotated[str, Field(max_length=256)] | None = None
+    external_objects: Annotated[list[PythonExternalObject], Field(min_length=1, max_length=32)] | None = None
+
+
 class ProtectionFault(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target_full_name: FullName
@@ -174,9 +187,14 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
             "Activate/deactivate a network variation only when requested, using its exact listed IntScheme path and the expected case/agent ID. "
             "Check success, active, and the before/after active-variation lists. After a timeout, list variations before another attempt. "
             "The user must launch pf_agent.py through ComPython for live calls. "
+            "Use run_python_script only for an explicitly requested existing ComPython in the current user's visible tree or global library, including outside the active project. Find its exact path with browse_powerfactory_tree or a returned reference. The current active case/agent checks still apply; the tool does not activate the script's owning project. Scripts run with configured inputs and can change data, context, files or external systems. A timeout does not cancel the script: query get_calculation_status with the original request_id, including if no project remains active; never automatically rerun or restart. "
+            "Use get_python_script_configuration to read existing ComPython bindings, remote script and file path. configure_python_script previews requested reference/path/binding edits; review the preview and use its digest for an authorized write. Remote-script selection can replace native settings. The External/Embedded selector is retained. Read configuration_after and partial-write errors; execution remains a separate request. "
             "Element listings are calculation-relevant elements for the active study case. "
             "Use an element's exact full_name to read its parameter attributes. "
             "Use get_element_connections for fixed endpoint/cubicle/busbar and switch-state reads on lines, transformers and ElmCoup; physical wiring, switch position and service state are separate. "
+            "Use get_connected_elements with an exact ElmTerm for paginated native one-hop equipment discovery, including open/out-of-service connections and unsupported identities; this does not establish energisation or trace paths. "
+            "Use list_result_files to discover stored ElmRes identities, then pass full_name for column metadata and row-index ranges. Use read_result_series with exact column indices and explicit numeric/object kinds for bounded native row pages. Sparse missing values are not zero; no source freshness or time-axis meaning is inferred. "
+            "Use get_powerfactory_messages for paginated general Output Window records, including without an active project/case. Check explicit text truncation; messages are not automatically attributed to the current context or calculation. The window is never cleared or flushed. "
             "Use get_short_circuit_contributions for native bus Ikss/angle and directly connected element-end currents, connection states, current fault settings and validity; no calculation or source tracing is performed. "
             "Use get_protection_chain for one exact ElmRelay or StaCubic: native protection containment, pelm measurement/block references, pSwitch references and assigned types. Contains is not proof of trip wiring; follow next_offset and check read_complete/errors. "
             "Use get_protection_settings for exact stored protection blocks, groups, types, CT/VT, characteristics and BlkDef definitions, including inactive/disabled objects. Follow its child/reference paths explicitly; stored parameters do not prove effective settings. "
@@ -194,7 +212,7 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
             "Use profile=extended to read available parameters from the broader class profile. "
             "pf_profiles.json separates parameters and per-calculation result candidates/defaults. "
             "Use list_element_attributes with include_results=true and calculation to inspect state-dependent candidates. "
-            "get_element_attributes/get_elements_attributes can include valid calculation defaults with include_results=true; check result_selection and its before/after validity. RMS time-series reading/execution is not implemented. "
+            "get_element_attributes/get_elements_attributes can include valid calculation defaults with include_results=true; check result_selection and its before/after validity. Read existing recorded series with read_result_series; RMS execution is not implemented. "
             "Use get_elements_attributes for up to eight elements per call; check each item's and attribute's status. "
             "Existing m:/c:/s: result values can be requested explicitly; no calculation or freshness guarantee is provided. "
             "Use get_line_loading to read all selected native c:loading values without thresholds or loading ranking. "
@@ -226,7 +244,8 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
 
     def call(tool, arguments):
         try:
-            if tool in ("inspect_protection_study", "run_short_circuit_fault", "run_protection_sweep", "get_protection_sweep_status", "read_protection_sweep_results"):
+            if tool in ("get_python_script_configuration", "configure_python_script", "run_python_script", "inspect_protection_study", "run_short_circuit_fault", "run_protection_sweep", "get_protection_sweep_status", "read_protection_sweep_results",
+                        "list_result_files", "read_result_series", "get_powerfactory_messages", "get_connected_elements"):
                 return bridge.call(tool, arguments, timeout=calculation_timeout)
             long_call = tool in ("run_power_flow", "run_short_circuit", "run_short_circuit_at_bus", "set_operating_setpoints", "get_calculation_status", "get_line_loading", "capture_result_snapshot", "browse_powerfactory_tree", "activate_study_case", "list_operation_scenarios", "list_network_variations", "list_expansion_stages", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "get_bus_voltage", "get_transformer_loading", "export_results", "set_study_time", "get_power_balance", "get_bus_voltage_sequences", "get_transformer_control_status", "get_element_connections", "get_short_circuit_contributions", "get_protection_chain", "get_protection_settings", "get_protection_response", "get_graphic_selection", "mark_in_graphics", "get_feeder_inventory", "export_graphic", "save_operation_scenario", "create_operation_scenario")
             return bridge.call(tool, arguments, timeout=calculation_timeout if long_call else None)
@@ -1285,8 +1304,8 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
         Omit attributes for each element's selected profile. Custom attributes apply
         to all elements in the batch. With attributes omitted, include_results=true
         adds valid power_flow/short_circuit defaults per class; calculation filters
-        them. Inspect each result_selection and native validity. RMS time-series
-        reads require ElmRes and are not implemented. With include_equipment_types, each assigned
+        them. Inspect each result_selection and native validity. Read recorded
+        ElmRes series separately with read_result_series. With include_equipment_types, each assigned
         type is read using its own profile; missing/unassigned references are
         explicit skips. Per-attribute, per-item and aggregate response budgets give
         explicit errors rather than silent truncation. Large values can be read
@@ -1316,6 +1335,96 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
         """
         return call("list_calculation_commands", {"calculation": calculation,
                     "offset": offset, "limit": limit, "settings_attributes": settings_attributes})
+
+    @server.tool(title="Read existing PowerFactory Python script configuration", annotations=annotations)
+    def get_python_script_configuration(command_full_name: FullName) -> dict[str, Any]:
+        """Read an exact existing ComPython's stored local configuration, including outside the active project.
+
+        Copy the exact path from browse_powerfactory_tree. Returns native script_id
+        (remote ComPython reference), filePath, raw source-selector fields, existing
+        named external-object bindings, and stored input/result parameter tables.
+        Supports the current user's visible tree and global library. Requires an
+        active project/case for context; no project or case activation is requested.
+        Check configuration_complete and per-field errors. Does not infer effective
+        inherited settings, execute a script, change configuration or save.
+        """
+        return call("get_python_script_configuration", {"command_full_name": command_full_name})
+
+    @server.tool(title="Configure an existing PowerFactory Python script", annotations=ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False,
+    ))
+    def configure_python_script(
+        command_full_name: FullName,
+        changes: PythonScriptChanges,
+        expected_study_case_full_name: FullName,
+        expected_agent_instance_id: Annotated[str, Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")],
+        confirmation_digest: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")] | None = None,
+    ) -> dict[str, Any]:
+        """Omit confirmation_digest for a read-only preview of ComPython configuration edits.
+
+        Choose an existing ComPython in the current user's visible tree or global
+        library, including outside the active project. Expected case/agent identify
+        the current active context; the script's owning project is not activated.
+        changes may contain
+        script_reference_full_name (exact ComPython path; null clears it), file_path
+        (native path text; empty string clears it), and/or external_objects with
+        existing parameter names and exact object full_name (null clears a binding).
+        Omitted fields remain unassigned. References resolve in the current user's
+        visible tree or global library; no objects or parameter names are created.
+        The file/embedded selector is not assigned and files are not created/checked.
+
+        Review current/requested configuration and remote-script settings before an
+        authorized write. Selecting a remote script can replace native settings.
+        The digest binds shown configurations and context; stale previews fail.
+        Cycles and editing/referencing the running agent's own script are rejected.
+        Writes run on the ComPython thread with per-step and final native readback.
+        Check success, requested_values_verified, attempts, changed_fields and
+        configuration_after; partial changes remain and no rollback is attempted.
+        No script Execute or explicit Save is called; native auto-save may persist
+        edits. A timeout does not undo setters: inspect get_python_script_configuration
+        before any retry; never automatically execute, restore or restart.
+        """
+        return call("configure_python_script", {"command_full_name": command_full_name,
+            "changes": changes.model_dump(exclude_unset=True),
+            "expected_study_case_full_name": expected_study_case_full_name,
+            "expected_agent_instance_id": expected_agent_instance_id, "confirmation_digest": confirmation_digest})
+
+    @server.tool(title="Execute an existing PowerFactory Python script", annotations=ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True,
+    ))
+    def run_python_script(
+        command_full_name: FullName,
+        expected_study_case_full_name: FullName,
+        expected_agent_instance_id: Annotated[str, Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")],
+        request_id: CalculationRequestId,
+    ) -> dict[str, Any]:
+        """Execute one exact existing ComPython with configured inputs in the current active context.
+
+        Run only an explicitly requested script whose behavior is understood.
+        Supports the current user's visible tree and global library, including
+        user-level scripts and scripts in inactive projects. The expected active
+        case/agent still apply; no project/case activation is requested by the tool.
+        Copy command_full_name from browse_powerfactory_tree (object_class=ComPython
+        in its containing folder), and expected case/agent from get_active_session.
+        Executes synchronously on the original ComPython thread; the agent's own
+        script is rejected. Scripts can change model data, active context, results,
+        files and external systems. No rollback or input overrides are provided.
+        The bridge must already be running; this cannot launch pf_agent.py.
+
+        Choose a unique request_id before execution. Identical repeats replay the
+        stored attempt within this agent session, including failures and context
+        changes. Uses the shared 32-attempt calculation/script history. Integer
+        zero means native Execute completion, not script correctness. Output stays
+        in PowerFactory's Output Window; stdout and result values are not captured.
+        Check context_after/context_error as well as status and return_code.
+
+        A timeout does not cancel Execute. Query get_calculation_status using the
+        original ID, even if the script left no active project. Never automatically
+        rerun under a new ID or restart; records disappear when the agent stops.
+        """
+        return call("run_python_script", {"command_full_name": command_full_name,
+            "expected_study_case_full_name": expected_study_case_full_name,
+            "expected_agent_instance_id": expected_agent_instance_id, "request_id": request_id})
 
     @server.tool(title="Execute an existing PowerFactory load flow", annotations=calculation_annotations)
     def run_power_flow(
@@ -1602,13 +1711,105 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
             "columns": None if columns is None else [column.model_dump() for column in columns],
             "axis_kind": axis_kind, "offset": offset, "limit": limit, "file_name": file_name})
 
-    @server.tool(title="Read a stored PowerFactory calculation attempt", annotations=annotations)
+    @server.tool(title="Discover stored result files or read recorded channel metadata", annotations=annotations)
+    def list_result_files(
+        full_name: FullName | None = None,
+        name_contains: Annotated[str, Field(max_length=120)] = "",
+        offset: Annotated[int, Field(ge=0, le=1000000, strict=True)] = 0,
+        limit: Annotated[int, Field(ge=1, le=100, strict=True)] = 20,
+    ) -> dict[str, Any]:
+        """Discover existing ElmRes files in the active project without loading them.
+
+        Omit full_name for exact file identities, filtered by name_contains and
+        paginated in exact-path order. Copy one returned ElmRes path to full_name
+        for its row/column counts, available row-index range, native default-axis
+        metadata and a page of column identities, variables, descriptions and units.
+        offset/limit select files in discovery mode and columns in exact-file mode.
+        name_contains applies only to discovery. Follow next_offset in either mode.
+
+        Metadata uses native Load/Release read memory, with per-field errors and
+        read_complete. Density, axis meaning, model revision and freshness remain
+        unknown. Empty files are not evidence of successful simulation. No Execute,
+        file export, variable registration, recording change or model write occurs.
+        """
+        return call("list_result_files", {"full_name": full_name, "name_contains": name_contains,
+            "offset": offset, "limit": limit})
+
+    @server.tool(title="Read selected native recorded result series by row index", annotations=annotations)
+    def read_result_series(
+        result_file_full_name: FullName,
+        columns: Annotated[list[RecordedProtectionColumn], Field(min_length=1, max_length=8)],
+        axis_kind: Literal["number", "object"] = "number",
+        offset: Annotated[int, Field(ge=0, le=1000000, strict=True)] = 0,
+        limit: Annotated[int, Field(ge=1, le=100, strict=True)] = 20,
+    ) -> dict[str, Any]:
+        """Read a bounded row-index interval from one existing active-project ElmRes.
+
+        Discover the exact file and column indices with list_result_files first.
+        Select 1-8 distinct columns; value_kind explicitly chooses number/object.
+        axis_kind chooses the native default numeric/object axis, which may be
+        time, distance or an index. offset/limit always select native row indices.
+        Follow next_offset without assuming regular sampling or interpolating.
+
+        Reuses the protection recorded-data reader: native units, metadata errors,
+        irregular axes, sparse code-3 unavailable samples, decoded object identity
+        and encoded object indices are retained. Missing values never become zero.
+        Load/Release manages native read memory. read_complete describes this page,
+        not calculation success, historical source or freshness; same-size content
+        changes between calls are not detected. No Execute, export, temporary vector
+        object, recording changes or model writes occur. Use the existing protection
+        reader's file_name option separately when a durable page export is wanted.
+        """
+        return call("read_result_series", {"result_file_full_name": result_file_full_name,
+            "columns": [column.model_dump() for column in columns], "axis_kind": axis_kind,
+            "offset": offset, "limit": limit})
+
+    @server.tool(title="Read general PowerFactory Output Window messages", annotations=annotations)
+    def get_powerfactory_messages(
+        offset: Annotated[int, Field(ge=0, le=1000000, strict=True)] = 0,
+        limit: Annotated[int, Field(ge=1, le=100, strict=True)] = 50,
+    ) -> dict[str, Any]:
+        """Read native Output Window records, including without an active case.
+
+        offset/limit select message records, not lines; multiline text stays intact.
+        Each text is a bounded 4096-byte UTF-8 prefix with original_character_count
+        and explicit truncated status. Check read_complete and follow next_offset.
+        The native API reads the whole window before paging. Appends/clears can
+        change indices between calls. These are general session messages; current
+        project/case do not prove origin, severity or calculation attribution.
+        Never clears/flushes output, changes logging, calculates or edits the model.
+        """
+        return call("get_powerfactory_messages", {"offset": offset, "limit": limit})
+
+    @server.tool(title="Discover native equipment connected to one exact bus", annotations=annotations)
+    def get_connected_elements(
+        bus_full_name: FullName,
+        offset: Annotated[int, Field(ge=0, le=1000000, strict=True)] = 0,
+        limit: Annotated[int, Field(ge=1, le=50, strict=True)] = 20,
+    ) -> dict[str, Any]:
+        """Read paginated one-hop native connectivity for one exact ElmTerm.
+
+        Uses GetConnectedElements(0,0,0), retaining open-switch and out-of-service
+        connections. Results are deduplicated and sorted by exact identity before
+        pagination; unsupported classes remain in pages with explicit partial status.
+        Supported endpoints reuse native cubicle/node/busbar and switch-state reads;
+        matching_bus_indices contains only exact physical matches to this terminal.
+        Service state, switch state and physical wiring remain separate facts.
+        Follow next_offset and inspect per-element errors and read_complete.
+        No calculation validity is required and no outages, model writes, multi-hop
+        traversal or energisation/source inference are performed.
+        """
+        return call("get_connected_elements", {"bus_full_name": bus_full_name, "offset": offset, "limit": limit})
+
+    @server.tool(title="Read a stored PowerFactory calculation or script attempt", annotations=annotations)
     def get_calculation_status(request_id: CalculationRequestId) -> dict[str, Any]:
         """Read the stored attempt/results for this ID in the current ComPython session.
 
         This never executes a calculation. Calls wait behind an ongoing synchronous
-        PF operation. Records persist only until the agent stops, with at most 32
-        attempts per session. A stored result is historical, not a freshness check
+        PF operation. Includes run_python_script attempts and works without an
+        active project/case. Records persist only until the agent stops, with at most
+        32 shared calculation/script attempts per session. A stored result is
+        historical, not a freshness check
         after subsequent calculations or model edits. Missing records after a
         restart do not establish that a previous calculation was never executed.
         record.outcome uses the stored evidence; it does not recheck historical
