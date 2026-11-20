@@ -31,7 +31,7 @@ importlib.reload(importlib.import_module("pf_protection_studies"))
 from pf_connection import default_connection_path, prepare_private_directory
 from pf_model import (
     CALCULATION_TOOLS, RequestError, describe, execute_read, list_calculation_commands,
-    run_calculation, run_python_script, get_python_script_configuration, configure_python_script,
+    run_calculation, run_python_script, run_python_in_session, get_python_script_configuration, configure_python_script,
     session_info, validate_arguments, calculation_outcome,
     capture_result_snapshot,
     browse_powerfactory_tree, activate_study_case,
@@ -136,6 +136,10 @@ def execute_tool(server, tool, arguments):
         return get_powerfactory_messages(server.app, arguments)
     if tool == "run_python_script":
         return run_python_script(server.app, server.instance_id, server.calculation_records, arguments)
+    if tool == "run_python_in_session":
+        if not server.allow_session_python:
+            raise RequestError("SESSION_PYTHON_DISABLED", "Launch the agent with main(allow_session_python=True) to enable session Python.", 403)
+        return run_python_in_session(server.app, server.instance_id, server.calculation_records, arguments)
     if tool == "get_calculation_status":
         record = server.calculation_records.get(arguments["request_id"])
         if record is None:
@@ -147,7 +151,7 @@ def execute_tool(server, tool, arguments):
     if tool == "get_protection_sweep_status":
         return get_protection_sweep_status(arguments)
     if tool == "get_powerfactory_capabilities":
-        return powerfactory_capabilities(server.app)
+        return {**powerfactory_capabilities(server.app), "session_python_enabled": server.allow_session_python}
     if tool == "browse_powerfactory_tree":
         return browse_powerfactory_tree(server.app, arguments)
     if tool == "activate_study_case":
@@ -229,10 +233,12 @@ class AgentServer(HTTPServer):
     allow_reuse_address = False
 
     def __init__(self, app, port=PORT, run_seconds=RUN_SECONDS,
-                 first_timeout=FIRST_REQUEST_TIMEOUT_SECONDS, idle_timeout=IDLE_TIMEOUT_SECONDS, gui_pump=None):
+                 first_timeout=FIRST_REQUEST_TIMEOUT_SECONDS, idle_timeout=IDLE_TIMEOUT_SECONDS, gui_pump=None,
+                 *, allow_session_python=False):
         if min(run_seconds, first_timeout, idle_timeout) <= 0:
             raise ValueError("All session time limits must be positive.")
         self.app = app
+        self.allow_session_python = allow_session_python is True
         self.gui_pump = gui_pump
         self.owner_thread_id = threading.get_ident()
         self.instance_id = str(uuid.uuid4())
@@ -438,7 +444,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 "powerfactory_process_id": os.getpid(), "tool": tool,
                 "data": data,
                 "execution": {
-                    "source": "live_powerfactory_session", "read_only": tool not in CALCULATION_TOOLS and tool not in ("run_python_script", "capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic", "mark_in_graphics") and (tool not in ("configure_python_script", "save_operation_scenario", "create_operation_scenario", "run_short_circuit_at_bus", "set_operating_setpoints", "run_short_circuit_fault", "run_protection_sweep") or arguments["confirmation_digest"] is None) and (tool != "read_protection_sweep_results" or arguments["file_name"] is None),
+                    "source": "live_powerfactory_session", "read_only": tool not in CALCULATION_TOOLS and tool not in ("run_python_script", "run_python_in_session", "capture_result_snapshot", "activate_study_case", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "set_study_time", "export_graphic", "mark_in_graphics") and (tool not in ("configure_python_script", "save_operation_scenario", "create_operation_scenario", "run_short_circuit_at_bus", "set_operating_setpoints", "run_short_circuit_fault", "run_protection_sweep") or arguments["confirmation_digest"] is None) and (tool != "read_protection_sweep_results" or arguments["file_name"] is None),
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     "script_thread_id": self.server.owner_thread_id,
                     "api_call_thread_id": api_thread_id,
@@ -477,7 +483,8 @@ def remove_own_connection(path, instance_id):
 
 
 def run_agent(app, connection_path, port=PORT, run_seconds=RUN_SECONDS,
-              first_timeout=FIRST_REQUEST_TIMEOUT_SECONDS, idle_timeout=IDLE_TIMEOUT_SECONDS, gui_events=False):
+              first_timeout=FIRST_REQUEST_TIMEOUT_SECONDS, idle_timeout=IDLE_TIMEOUT_SECONDS, gui_events=False,
+              *, allow_session_python=False):
     if app is None or app.GetCurrentScript() is None:
         raise RuntimeError("Launch pf_agent.py through ComPython in the existing PowerFactory GUI.")
     if app.GetCurrentUser() is None:
@@ -485,7 +492,8 @@ def run_agent(app, connection_path, port=PORT, run_seconds=RUN_SECONDS,
     connection_path = Path(connection_path).resolve()
     gui = GuiEventPump(app, requested=gui_events)
     try:
-        with AgentServer(app, port, run_seconds, first_timeout, idle_timeout, gui_pump=gui) as server:
+        with AgentServer(app, port, run_seconds, first_timeout, idle_timeout, gui_pump=gui,
+                         allow_session_python=allow_session_python) as server:
             try:
                 write_connection(connection_path, server.connection_info())
                 app.PrintPlain("[PF MCP] Listening at " + server.connection_info()["base_url"])
@@ -507,7 +515,7 @@ def run_agent(app, connection_path, port=PORT, run_seconds=RUN_SECONDS,
     return summary
 
 
-def main(gui_events=True):
+def main(gui_events=True, *, allow_session_python=False):
     pf = importlib.import_module("powerfactory")
     if getattr(pf, "_pf_mcp_agent_running", False):
         raise RuntimeError("The MCP agent is already active. Stop it before launching another agent.")
@@ -537,10 +545,10 @@ def main(gui_events=True):
                         "then launch pf_agent.py through ComPython again."
                     ) from exc
                 pf._pf_mcp_application = app
-        return run_agent(app, default_connection_path(), gui_events=gui_events)
+        return run_agent(app, default_connection_path(), gui_events=gui_events, allow_session_python=allow_session_python)
     finally:
         pf._pf_mcp_agent_running = False
 
 
 if __name__ == "__main__":
-    main()
+    main(allow_session_python=True)

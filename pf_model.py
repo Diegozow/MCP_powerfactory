@@ -107,14 +107,14 @@ SETPOINT_CONTROLS = ("mode_inp", "av_mode", "ip_ctrl", "c_pstac", "c_psecc", "c_
 PYTHON_CONFIGURATION_FIELDS = ("script_id", "filePath", "scriptSourceChoice", "isRemoteScriptSet", "obj_name", "obj_id",
                                "IntType", "IntName", "IntExpr", "IntUnit", "IntDesc",
                                "IntResType", "IntResName", "IntResExpr", "IntResUnit", "IntResDesc")
-IMPLEMENTATION_VERSION = "0.27.0"
+IMPLEMENTATION_VERSION = "0.28.0"
 SUPPORTED_TOOLS = (
     "get_active_session", "get_active_scenario", "list_operation_scenarios", "browse_powerfactory_tree", "activate_study_case",
     "list_network_variations", "activate_network_variation", "deactivate_network_variation",
     "list_model_elements", "get_line_loading", "capture_result_snapshot", "get_result_snapshot",
     "get_element_attributes", "get_equipment_type_attributes", "get_model_inventory", "list_element_attributes",
     "get_elements_attributes", "list_calculation_commands", "run_power_flow", "run_short_circuit",
-    "run_python_script",
+    "run_python_script", "run_python_in_session",
     "get_python_script_configuration", "configure_python_script",
     "get_calculation_status", "activate_operation_scenario", "get_bus_voltage",
     "get_transformer_loading", "export_results", "get_powerfactory_capabilities",
@@ -701,6 +701,20 @@ def validate_arguments(tool, arguments):
             raise RequestError("INVALID_ARGUMENTS", "Copy the reviewed preview's exact confirmation_digest.")
         return {"command_full_name": path, "expected_study_case_full_name": case, "expected_agent_instance_id": instance,
                 "changes": changes, "confirmation_digest": digest}
+    if tool == "run_python_in_session":
+        if set(arguments) != {"code", "expected_study_case_full_name", "expected_agent_instance_id", "request_id"}:
+            raise RequestError("INVALID_ARGUMENTS", "Provide code, expected study case (or null), agent ID and request_id.")
+        code = arguments["code"]
+        if not isinstance(code, str) or not code.strip():
+            raise RequestError("INVALID_ARGUMENTS", "code must contain nonblank Python source.")
+        case = arguments["expected_study_case_full_name"]
+        if case is not None:
+            validate_python_configuration_path(case, "IntCase")
+        instance = arguments["expected_agent_instance_id"]
+        if not isinstance(instance, str) or re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", instance) is None:
+            raise RequestError("INVALID_ARGUMENTS", "Copy expected_agent_instance_id from the current session.")
+        validate_request_id(arguments["request_id"])
+        return arguments
     if tool == "run_python_script":
         if set(arguments) != {"command_full_name", "expected_study_case_full_name", "expected_agent_instance_id", "request_id"}:
             raise RequestError("INVALID_ARGUMENTS", "Provide only the exact ComPython path, expected case/agent and request_id. Configure script inputs in PowerFactory.")
@@ -1921,6 +1935,55 @@ def configure_python_script(app, instance_id, info, arguments):
             "changed_fields": [name for name in PYTHON_CONFIGURATION_FIELDS if before["configuration"]["attributes"][name] != after["attributes"][name]],
             "context_after": context_after, "context_unchanged": context_after == before["context"], "error": error,
             "note": "Partial changes remain visible. No script execution, explicit save or automatic rollback was performed. Inspect configuration_after before any retry."}
+
+
+def run_python_in_session(app, instance_id, calculation_records, arguments):
+    if arguments["expected_agent_instance_id"] != instance_id:
+        raise RequestError("INSTANCE_MISMATCH", "The agent restarted; nothing was executed. Refresh the session before new work.", 409)
+    request_id = arguments["request_id"]
+    signature = hashlib.sha256(json.dumps({"tool": "run_python_in_session", "arguments": arguments},
+                                          sort_keys=True).encode("ascii")).hexdigest()
+    if request_id in calculation_records:
+        prior = calculation_records[request_id]
+        if prior["signature"] != signature:
+            raise RequestError("REQUEST_ID_CONFLICT", "This request_id already identifies different execution arguments.", 409)
+        return {**prior["response"], "replayed": True}
+    if len(calculation_records) >= 32:
+        raise RequestError("CALCULATION_HISTORY_FULL", "This agent has recorded 32 execution attempts; start a new work session.", 409)
+    project, study_case = app.GetActiveProject(), app.GetActiveStudyCase()
+    before = {"project": describe(project), "study_case": describe(study_case)}
+    study_case_path = before["study_case"]["full_name"] if study_case is not None else None
+    if study_case_path != arguments["expected_study_case_full_name"]:
+        raise RequestError("SESSION_CHANGED", "The active study case differs from the expected path or null; nothing was executed.", 409)
+    scope = {"app": app, "project": project, "study_case": study_case, "powerfactory": sys.modules.get("powerfactory"),
+             "result": None}
+    response = {**before, "request_id": request_id, "calculation": "python_session", "status": "running",
+                "success": False, "replayed": False, "result": None, "context_before": before,
+                "started_at_utc": datetime.now(timezone.utc).isoformat()}
+    calculation_records[request_id] = {"signature": signature, "response": response}
+    try:
+        exec(compile(arguments["code"], "<run_python_in_session>", "exec"), scope)
+    except (Exception, SystemExit, KeyboardInterrupt) as exc:
+        message = (type(exc).__name__ + ": " + str(exc))[:320]
+        response.update(status="failed", error={"code": "SESSION_PYTHON_FAILED",
+                                                "message": message.encode("utf-8", "replace").decode("utf-8")})
+    else:
+        response.update(status="succeeded", success=True)
+        try:
+            encoded = json.dumps(scope.get("result"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+            if len(encoded) > 524288:
+                response["result_error"] = {"code": "SESSION_PYTHON_RESULT_TOO_LARGE", "message": "result exceeds 512 KiB."}
+            else:
+                response["result"] = json.loads(encoded)
+        except (TypeError, ValueError, RecursionError):
+            response["result_error"] = {"code": "SESSION_PYTHON_RESULT_INVALID", "message": "Assign a JSON-serializable value to result."}
+    response["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+    try:
+        response["context_after"] = {"project": describe(app.GetActiveProject()), "study_case": describe(app.GetActiveStudyCase())}
+    except Exception as exc:
+        response["context_after"] = None
+        response["context_error"] = (type(exc).__name__ + ": " + str(exc))[:320]
+    return response
 
 
 def run_python_script(app, instance_id, calculation_records, arguments):

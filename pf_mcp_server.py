@@ -244,7 +244,7 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
 
     def call(tool, arguments):
         try:
-            if tool in ("get_python_script_configuration", "configure_python_script", "run_python_script", "inspect_protection_study", "run_short_circuit_fault", "run_protection_sweep", "get_protection_sweep_status", "read_protection_sweep_results",
+            if tool in ("get_python_script_configuration", "configure_python_script", "run_python_script", "run_python_in_session", "inspect_protection_study", "run_short_circuit_fault", "run_protection_sweep", "get_protection_sweep_status", "read_protection_sweep_results",
                         "list_result_files", "read_result_series", "get_powerfactory_messages", "get_connected_elements"):
                 return bridge.call(tool, arguments, timeout=calculation_timeout)
             long_call = tool in ("run_power_flow", "run_short_circuit", "run_short_circuit_at_bus", "set_operating_setpoints", "get_calculation_status", "get_line_loading", "capture_result_snapshot", "browse_powerfactory_tree", "activate_study_case", "list_operation_scenarios", "list_network_variations", "list_expansion_stages", "activate_network_variation", "deactivate_network_variation", "activate_operation_scenario", "get_bus_voltage", "get_transformer_loading", "export_results", "set_study_time", "get_power_balance", "get_bus_voltage_sequences", "get_transformer_control_status", "get_element_connections", "get_short_circuit_contributions", "get_protection_chain", "get_protection_settings", "get_protection_response", "get_graphic_selection", "mark_in_graphics", "get_feeder_inventory", "export_graphic", "save_operation_scenario", "create_operation_scenario")
@@ -1424,6 +1424,32 @@ def build_server(connection_path, timeout=10, calculation_timeout=120):
         """
         return call("run_python_script", {"command_full_name": command_full_name,
             "expected_study_case_full_name": expected_study_case_full_name,
+            "expected_agent_instance_id": expected_agent_instance_id, "request_id": request_id})
+
+    @server.tool(title="Execute Python source in the active PowerFactory session", annotations=ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True,
+    ))
+    def run_python_in_session(
+        code: Annotated[str, Field(strict=True, min_length=1)],
+        expected_study_case_full_name: FullName | None,
+        expected_agent_instance_id: Annotated[str, Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")],
+        request_id: CalculationRequestId,
+    ) -> dict[str, Any]:
+        """Execute explicitly requested, trusted Python on the original ComPython thread.
+
+        Requires session_python_enabled in get_powerfactory_capabilities.agent.
+        The snippet receives app, project, study_case and powerfactory. Assign a JSON
+        value to result. Check data.success for Python completion and
+        data.result_error for serialization/size errors. Uses a fresh namespace
+        each time. Code has the PowerFactory process's permissions.
+
+        Pass the current agent ID and exact active study case path, or null when
+        no study case is active. Choose request_id before executing. Identical
+        requests replay the stored attempt in this agent session. After a client
+        timeout, use get_calculation_status with the original ID. Execution can
+        continue after the timeout and partial effects can persist on failure.
+        """
+        return call("run_python_in_session", {"code": code, "expected_study_case_full_name": expected_study_case_full_name,
             "expected_agent_instance_id": expected_agent_instance_id, "request_id": request_id})
 
     @server.tool(title="Execute an existing PowerFactory load flow", annotations=calculation_annotations)
